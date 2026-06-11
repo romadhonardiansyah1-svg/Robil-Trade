@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: rtrade
+          POSTGRES_PASSWORD: rtrade
+          POSTGRES_DB: rtrade
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rtrade -d rtrade"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Lint
+        run: |
+          uv run ruff check src tests migrations
+          uv run ruff format --check src tests migrations
+      - name: Typecheck (mypy --strict)
+        run: uv run mypy
+      - name: Tests (unit + integration)
+        env:
+          RTRADE_TEST_DATABASE_URL: postgresql+asyncpg://rtrade:rtrade@localhost:5432/rtrade
+          RTRADE_TEST_REDIS_URL: redis://localhost:6379/0
+        run: uv run pytest -q --cov=rtrade --cov-report=term

@@ -1,0 +1,29 @@
+# Secrets — NEVER commit (IMPLEMENTATION_PLAN §0.8)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Tooling caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+htmlcov/
+.coverage*
+
+# Data & local artifacts
+data/
+*.sqlite
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/

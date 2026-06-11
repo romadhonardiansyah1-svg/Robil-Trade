@@ -1,0 +1,23 @@
+# Local hooks (system language) — memakai toolchain uv yang sama dengan CI,
+# tanpa dependensi jaringan/tag eksternal.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --force-exclude
+        language: system
+        types_or: [python]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format (check)
+        entry: uv run ruff format --check --force-exclude
+        language: system
+        types_or: [python]
+        require_serial: true
+      - id: block-dotenv
+        name: block committing .env files
+        entry: .env files must never be committed (PLAN §0.8)
+        language: fail
+        files: '^\.env(\..*)?$'
+        exclude: '^\.env\.example$'

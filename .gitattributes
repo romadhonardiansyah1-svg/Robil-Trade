@@ -1,0 +1,4 @@
+# Normalize line endings: LF in repo & checkout (parity dev-Windows ↔ VPS-Linux).
+* text=auto eol=lf
+*.png binary
+*.jpg binary

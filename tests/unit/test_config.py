@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from rtrade.core.config import (
     AppConfig,
+    EdgeQualitySettings,
     InstrumentsFile,
     RiskSettings,
     Secrets,
@@ -34,6 +35,8 @@ class TestRealConfigFiles:
         cfg = AppConfig.load(config_dir=config_dir, env_file=None)
         assert cfg.settings.signal.confluence_min_score == 60
         assert cfg.settings.signal.confidence_min == 0.55
+        assert cfg.settings.signal.edge_quality.enabled is True
+        assert cfg.settings.signal.edge_quality.min_score == 65
         assert cfg.settings.risk.rr_min == 1.5
         assert cfg.settings.risk.sl_atr_max == 3.0
         assert cfg.settings.llm.enabled is False  # P1: no LLM yet
@@ -83,6 +86,25 @@ class TestGuardrailFloors:
     def test_sl_bounds_inverted_rejected(self) -> None:
         with pytest.raises(ValidationError):
             RiskSettings.model_validate({**VALID_RISK, "sl_atr_min": 3.0, "sl_atr_max": 2.0})
+
+    def test_edge_quality_atr_percentiles_inverted_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="min_atr_percentile"):
+            EdgeQualitySettings.model_validate(
+                {
+                    "enabled": True,
+                    "min_score": 65,
+                    "max_spread_atr": 0.12,
+                    "min_atr_percentile": 98,
+                    "max_atr_percentile": 96,
+                    "max_opposing_wick_ratio": 0.62,
+                    "max_total_wick_body_ratio": 6,
+                    "min_body_atr": 0.03,
+                    "min_volume_ratio": 0.55,
+                    "volume_window": 20,
+                    "max_range_expansion_atr": 2.8,
+                    "max_entry_distance_atr": 1.25,
+                }
+            )
 
 
 class TestTypoProtection:

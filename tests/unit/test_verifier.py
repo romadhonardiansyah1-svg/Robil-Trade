@@ -292,3 +292,18 @@ class TestVerifierEdgeCases:
         # 3 and 5 are small integers - should not be flagged.
         num_mismatches = [m for m in report.number_mismatches if "not found" in m]
         assert len(num_mismatches) == 0
+
+    def test_time_windows_not_treated_as_market_numbers(self) -> None:
+        """Narrative time windows should not be matched to prices or indicators."""
+        pack = _make_pack()
+        assessment = _make_assessment(
+            rationale=(
+                "Pantau kalender 72 jam ke depan dan evaluasi ulang dalam 30 hari "
+                "tanpa mengubah level entry yang sudah ditentukan"
+            ),
+        )
+        review = _make_review()
+
+        report = verify(pack, assessment, review)
+
+        assert not report.hallucination_flag

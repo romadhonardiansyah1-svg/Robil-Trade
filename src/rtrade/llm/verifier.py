@@ -79,6 +79,8 @@ def verify(
     pack_numbers = _extract_pack_numbers(pack)
     text_numbers = _extract_text_numbers(assessment, review)
     for num_str, value, context in text_numbers:
+        if not _should_verify_number(value, context):
+            continue
         checked_claims += 1
         match = _find_closest_match(value, pack_numbers)
         if match is None:
@@ -172,24 +174,30 @@ def _extract_text_numbers(
     assessment: AnalystAssessment,
     review: CriticReview,
 ) -> list[tuple[str, float, str]]:
-    """Extract (number_str, value, context) from LLM text outputs."""
+    """Extract (number_str, value, local_context) from LLM text outputs."""
     results: list[tuple[str, float, str]] = []
 
     # From analyst rationale.
     for m in _NUMBER_RE.finditer(assessment.rationale_id):
-        results.append((m.group(), float(m.group()), "analyst.rationale"))
+        results.append((m.group(), float(m.group()), _number_context(assessment.rationale_id, m)))
 
     # From analyst key_risks.
     for risk in assessment.key_risks:
         for m in _NUMBER_RE.finditer(risk):
-            results.append((m.group(), float(m.group()), "analyst.risk"))
+            results.append((m.group(), float(m.group()), _number_context(risk, m)))
 
     # From critic arguments.
     for ca in review.counter_arguments:
         for m in _NUMBER_RE.finditer(ca.argument):
-            results.append((m.group(), float(m.group()), "critic.argument"))
+            results.append((m.group(), float(m.group()), _number_context(ca.argument, m)))
 
     return results
+
+
+def _number_context(text: str, match: re.Match[str], radius: int = 24) -> str:
+    start = max(0, match.start() - radius)
+    end = min(len(text), match.end() + radius)
+    return text[start:end].lower()
 
 
 def _find_closest_match(
@@ -230,6 +238,53 @@ def _get_tolerance(field_name: str, value: float) -> float:
 
     # Price tolerance: 0.1% relative, minimum 0.01.
     return max(abs(value) * 0.001, 0.01)
+
+
+def _should_verify_number(value: float, context: str) -> bool:
+    """Return True only for numbers that look like market data claims."""
+    if not _is_significant_number(value):
+        return False
+
+    non_market_units = (
+        " jam",
+        "jam ",
+        " hari",
+        "hari ",
+        " menit",
+        "menit ",
+        " minggu",
+        "minggu ",
+        " bulan",
+        "bulan ",
+        " hour",
+        "hours",
+        " day",
+        "days",
+        " minute",
+        "minutes",
+        " week",
+        "weeks",
+        " month",
+        "months",
+    )
+    if any(unit in context for unit in non_market_units):
+        return False
+
+    count_terms = (
+        "alasan",
+        "risiko utama",
+        "argumen",
+        "faktor",
+        "indikator",
+        "sumber",
+        "reason",
+        "risk",
+        "argument",
+        "factor",
+        "indicator",
+        "source",
+    )
+    return not (value == int(value) and any(term in context for term in count_terms))
 
 
 def _is_significant_number(value: float) -> bool:

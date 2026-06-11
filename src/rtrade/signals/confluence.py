@@ -1,10 +1,11 @@
 """Confluence scorer -- 0-100 composite quality score (PLAN 8.6).
 
-Components (weights from config/strategies/*.yaml):
+    Components (weights from config/strategies/*.yaml):
     trend      (25): Trend alignment on 1H+4H
     momentum   (20): MACD histogram direction + RSI recovery
     structure  (20): Entry near S/R or gap zone
-    volume     (15): Volume > 1.2x SMA20 (redistributed if unavailable)
+    volume     (15): Volume > 1.2x SMA20. If volume is unavailable, this
+                     slot carries redistributed score from non-volume evidence.
     macro      (20): No high-impact events + session active + funding OK
 
 Candidates proceed only if score >= confluence_min_score (default 60).
@@ -202,11 +203,6 @@ def compute_confluence(ctx: ConfluenceContext, entry: float) -> ConfluenceBreakd
     # If volume data is missing, redistribute its weight proportionally.
     has_volume = "volume" in ctx.df_1h.columns and ctx.df_1h["volume"].astype(float).sum() > 0
 
-    if has_volume:
-        vol_score = score_volume(ctx.df_1h, max_score=15)
-    else:
-        vol_score = 0  # redistributed: other components get proportionally more
-
     trend = score_trend(ctx.df_1h, ctx.df_4h, ctx.action, max_score=25)
     momentum = score_momentum(ctx.df_1h, ctx.action, max_score=20)
     structure = score_structure(
@@ -216,15 +212,14 @@ def compute_confluence(ctx: ConfluenceContext, entry: float) -> ConfluenceBreakd
         ctx.has_high_impact_event, ctx.session_active, ctx.funding_extreme, max_score=20
     )
 
-    # If no volume data, redistribute 15 points proportionally.
-    if not has_volume:
-        max_other = 25 + 20 + 20 + 20  # 85
-        if max_other > 0:
-            boost_factor = 100 / max_other
-            trend = min(25, round(trend * boost_factor * 25 / 100))
-            momentum = min(20, round(momentum * boost_factor * 20 / 100))
-            structure = min(20, round(structure * boost_factor * 20 / 100))
-            macro = min(20, round(macro * boost_factor * 20 / 100))
+    if has_volume:
+        vol_score = score_volume(ctx.df_1h, max_score=15)
+    else:
+        # Preserve a 0-100 total scale when FX/metals data has no reliable volume.
+        # The 15-point volume slot becomes a pro-rata confidence top-up from
+        # observable non-volume evidence, rather than shrinking the whole signal.
+        other_score = trend + momentum + structure + macro
+        vol_score = round(other_score / 85 * 15)
 
     return ConfluenceBreakdown(
         trend=min(25, trend),

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta  # type: ignore[import-untyped]
+import pandas_ta as ta
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +101,7 @@ def compute(
         df["macd_hist"] = macd_df[f"MACDh_{macd_fast}_{macd_slow}_{macd_signal}"]
 
     # --- Bollinger Bands ---
-    bb_df = ta.bbands(df["close"], length=bb_length, std=bb_std)
+    bb_df = ta.bbands(df["close"], length=bb_length, std=bb_std)  # type: ignore[arg-type]
     if bb_df is not None:
         # pandas-ta column names vary by version (e.g. BBU_20_2.0 vs BBU_20_2).
         # Find columns dynamically by prefix.

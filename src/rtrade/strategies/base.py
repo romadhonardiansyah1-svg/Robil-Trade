@@ -46,10 +46,20 @@ class StrategyConfig:
         return current
 
     def get_int(self, key: str, default: int = 0) -> int:
-        return int(self.get(key, default))  # type: ignore[arg-type]
+        value = self.get(key, default)
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int | float | str):
+            return int(value)
+        raise ValueError(f"strategy config {key!r} must be int-compatible")
 
     def get_float(self, key: str, default: float = 0.0) -> float:
-        return float(self.get(key, default))  # type: ignore[arg-type]
+        value = self.get(key, default)
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, int | float | str):
+            return float(value)
+        raise ValueError(f"strategy config {key!r} must be float-compatible")
 
 
 class Strategy(ABC):

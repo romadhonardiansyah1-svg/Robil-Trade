@@ -41,6 +41,16 @@ class S2RangeMR(Strategy):
         """Add range-specific columns: band edges, Donchian width."""
         lookback = cfg.get_int("range.band_lookback", 100)
         donchian = cfg.get_int("range.donchian_period", 20)
+        df.attrs["s2_adx_max"] = cfg.get_float("range.adx_max", 20.0)
+        df.attrs["s2_stability_lookback"] = cfg.get_int("range.stability_lookback", 30)
+        df.attrs["s2_stability_max_change_pct"] = cfg.get_float(
+            "range.stability_max_change_pct", 30.0
+        )
+        df.attrs["s2_rsi_oversold"] = cfg.get_float("entry.rsi_oversold", 35.0)
+        df.attrs["s2_rsi_overbought"] = cfg.get_float("entry.rsi_overbought", 65.0)
+        df.attrs["s2_band_tolerance_atr_mult"] = cfg.get_float("entry.band_tolerance_atr_mult", 0.5)
+        df.attrs["s2_sl_atr_mult"] = cfg.get_float("levels.sl_atr_mult", 1.0)
+        df.attrs["s2_rr_min"] = cfg.get_float("levels.rr_min", 1.5)
 
         # Donchian channel for band detection.
         df["donch_high"] = df["high"].rolling(donchian).max()
@@ -65,13 +75,18 @@ class S2RangeMR(Strategy):
 
         last = df.iloc[-1]
         adx = float(last.get("adx", 30))
+        adx_max = float(df.attrs.get("s2_adx_max", 20.0))
 
         # Must be in RANGE regime (ADX < 20).
-        if adx >= 20:
+        if adx >= adx_max:
             return None
 
         # Check band stability.
-        if not self._is_band_stable(df):
+        if not self._is_band_stable(
+            df,
+            stability_bars=int(df.attrs.get("s2_stability_lookback", 30)),
+            max_change_pct=float(df.attrs.get("s2_stability_max_change_pct", 30.0)),
+        ):
             return None
 
         # Check LONG and SHORT.
@@ -125,14 +140,16 @@ class S2RangeMR(Strategy):
 
         band_low = float(last.get("band_low", 0))
         band_high = float(last.get("band_high", 0))
-        tolerance = 0.5 * atr
+        tolerance = float(df.attrs.get("s2_band_tolerance_atr_mult", 0.5)) * atr
+        rsi_oversold = float(df.attrs.get("s2_rsi_oversold", 35.0))
+        rsi_overbought = float(df.attrs.get("s2_rsi_overbought", 65.0))
 
         if action == Action.BUY:
             # Price at lower band edge ± 0.5×ATR.
             if not (band_low - tolerance <= close <= band_low + tolerance):
                 return False
             # RSI < 35 (oversold).
-            if rsi >= 35:
+            if rsi >= rsi_oversold:
                 return False
             # Candle reversal: close back inside band.
             return close >= band_low
@@ -142,7 +159,7 @@ class S2RangeMR(Strategy):
             if not (band_high - tolerance <= close <= band_high + tolerance):
                 return False
             # RSI > 65 (overbought).
-            if rsi <= 65:
+            if rsi <= rsi_overbought:
                 return False
             # Close back inside band.
             return close <= band_high
@@ -154,31 +171,33 @@ class S2RangeMR(Strategy):
         band_low = float(last["band_low"])
         band_high = float(last["band_high"])
         band_mid = float(last["band_mid"])
+        sl_atr_mult = float(df.attrs.get("s2_sl_atr_mult", 1.0))
+        rr_min = float(df.attrs.get("s2_rr_min", 1.5))
 
         if atr <= 0:
             raise ValueError("ATR must be positive for level computation")
 
         if intent.action == Action.BUY:
             entry = band_low
-            stop_loss = band_low - 1.0 * atr
+            stop_loss = band_low - sl_atr_mult * atr
             take_profit = band_mid
 
             # R:R check — DISCARD if < 1.5.
             sl_dist = entry - stop_loss
             tp_dist = take_profit - entry
-            if sl_dist <= 0 or tp_dist / sl_dist < 1.5:
+            if sl_dist <= 0 or tp_dist / sl_dist < rr_min:
                 # Adjust TP to meet minimum R:R.
-                take_profit = entry + 1.5 * sl_dist
+                take_profit = entry + rr_min * sl_dist
 
         else:  # SELL
             entry = band_high
-            stop_loss = band_high + 1.0 * atr
+            stop_loss = band_high + sl_atr_mult * atr
             take_profit = band_mid
 
             sl_dist = stop_loss - entry
             tp_dist = entry - take_profit
-            if sl_dist <= 0 or tp_dist / sl_dist < 1.5:
-                take_profit = entry - 1.5 * sl_dist
+            if sl_dist <= 0 or tp_dist / sl_dist < rr_min:
+                take_profit = entry - rr_min * sl_dist
 
         return LevelSet(
             entry_limit=entry,
@@ -200,4 +219,5 @@ class S2RangeMR(Strategy):
             return False
 
         rr = tp_dist / sl_dist
-        return rr >= 1.5
+        rr_min = float(df.attrs.get("s2_rr_min", 1.5))
+        return rr >= rr_min

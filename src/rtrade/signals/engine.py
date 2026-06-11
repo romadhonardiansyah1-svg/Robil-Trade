@@ -20,6 +20,7 @@ from rtrade.core.config import InstrumentConfig
 from rtrade.core.constants import Timeframe
 from rtrade.indicators.structure import GapZone, SRLevel
 from rtrade.signals.confluence import ConfluenceContext, compute_confluence
+from rtrade.signals.edge_quality import EdgeQualityConfig, assess_edge_quality
 from rtrade.signals.levels import validate_and_round_levels
 from rtrade.signals.schemas import SignalCandidate
 from rtrade.strategies.base import Strategy, StrategyConfig
@@ -44,6 +45,9 @@ def generate_candidate(
     rr_min: float = 1.5,
     confluence_min_score: int = 60,
     valid_bars: int = 6,
+    spread: float | None = None,
+    edge_quality_enabled: bool = True,
+    edge_quality_config: EdgeQualityConfig | None = None,
 ) -> SignalCandidate | None:
     """Run the full deterministic signal generation pipeline.
 
@@ -91,7 +95,25 @@ def generate_candidate(
         logger.info("strategy confirm_signal rejected candidate")
         return None
 
-    # 6. Compute confluence.
+    # 6. Reject adverse-selection environments before spending confluence/LLM budget.
+    if edge_quality_enabled:
+        edge_report = assess_edge_quality(
+            df,
+            intent.action,
+            levels.entry_limit,
+            spread=spread,
+            config=edge_quality_config,
+        )
+        if not edge_report.passed:
+            logger.info(
+                "edge quality rejected candidate",
+                score=edge_report.score,
+                failures=[f"{f.code}: {f.reason}" for f in edge_report.failures],
+                metrics=edge_report.metrics,
+            )
+            return None
+
+    # 7. Compute confluence.
     atr = float(df.iloc[-1].get("atr", 0))
     ctx = ConfluenceContext(
         df_1h=df,
@@ -114,7 +136,7 @@ def generate_candidate(
         )
         return None
 
-    # 7. Position sizing.
+    # 8. Position sizing.
     sl_dist = abs(levels.entry_limit - levels.stop_loss)
     if sl_dist == 0:
         return None
@@ -125,12 +147,12 @@ def generate_candidate(
     if position_size <= 0:
         return None
 
-    # 8. Compute valid_until.
+    # 9. Compute valid_until.
     tf = Timeframe.H1  # S1 signals on 1H
     bar_ts = pd.Timestamp(df.index[-1]).to_pydatetime().replace(tzinfo=UTC)
     valid_until = bar_ts + timedelta(hours=valid_bars)
 
-    # 9. Build frozen candidate.
+    # 10. Build frozen candidate.
     now = datetime.now(UTC)
     candidate = SignalCandidate(
         candidate_id=f"cand_{uuid.uuid4().hex[:12]}",

@@ -12,6 +12,7 @@ The "official" backtester for Robil Trade. Key rules:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import pandas as pd
 
@@ -96,12 +97,12 @@ def run_backtest(
     for sig in signals:
         trades.append(
             Trade(
-                bar_index=int(sig["bar_index"]),  # type: ignore[arg-type]
+                bar_index=_as_int(sig["bar_index"], "bar_index"),
                 direction=str(sig["direction"]),
-                entry_limit=float(sig["entry_limit"]),  # type: ignore[arg-type]
-                stop_loss=float(sig["stop_loss"]),  # type: ignore[arg-type]
-                take_profit=float(sig["take_profit"]),  # type: ignore[arg-type]
-                valid_bars=int(sig.get("valid_bars", 6)),  # type: ignore[arg-type]
+                entry_limit=_as_float(sig["entry_limit"], "entry_limit"),
+                stop_loss=_as_float(sig["stop_loss"], "stop_loss"),
+                take_profit=_as_float(sig["take_profit"], "take_profit"),
+                valid_bars=_as_int(sig.get("valid_bars", 6), "valid_bars"),
             )
         )
 
@@ -204,3 +205,17 @@ def run_backtest(
         initial_equity=initial_equity,
         final_equity=equity,
     )
+
+
+def _as_int(value: Any, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"signal field {field_name!r} must be int-compatible") from exc
+
+
+def _as_float(value: Any, field_name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"signal field {field_name!r} must be float-compatible") from exc

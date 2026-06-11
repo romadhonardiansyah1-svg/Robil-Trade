@@ -12,7 +12,7 @@ Events that are ALWAYS considered high-impact regardless of provider data:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import structlog
 
@@ -81,13 +81,16 @@ def check_news_blackout(
         if not is_high:
             continue
 
-        event_time = event.get("event_time")
-        if event_time is None:
+        raw_event_time = event.get("event_time")
+        if raw_event_time is None:
             continue
-        if isinstance(event_time, str):
-            from datetime import UTC
-
-            event_time = datetime.fromisoformat(event_time).replace(tzinfo=UTC)
+        if isinstance(raw_event_time, str):
+            parsed = datetime.fromisoformat(raw_event_time.replace("Z", "+00:00"))
+            event_time = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+        elif isinstance(raw_event_time, datetime):
+            event_time = raw_event_time
+        else:
+            continue
 
         event_time = ensure_utc(event_time)
 

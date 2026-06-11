@@ -35,12 +35,34 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class EdgeQualitySettings(_StrictModel):
+    enabled: bool
+    min_score: int = Field(ge=0, le=100)
+    max_spread_atr: float = Field(gt=0.0, le=1.0)
+    min_atr_percentile: float = Field(ge=0.0, le=100.0)
+    max_atr_percentile: float = Field(ge=0.0, le=100.0)
+    max_opposing_wick_ratio: float = Field(gt=0.0, le=1.0)
+    max_total_wick_body_ratio: float = Field(gt=0.0)
+    min_body_atr: float = Field(ge=0.0)
+    min_volume_ratio: float = Field(ge=0.0)
+    volume_window: int = Field(ge=5)
+    max_range_expansion_atr: float = Field(gt=0.0)
+    max_entry_distance_atr: float = Field(gt=0.0)
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> "EdgeQualitySettings":
+        if self.min_atr_percentile >= self.max_atr_percentile:
+            raise ValueError("min_atr_percentile must be < max_atr_percentile")
+        return self
+
+
 class SignalSettings(_StrictModel):
     confluence_min_score: int = Field(ge=0, le=100)
     confidence_min: float = Field(ge=0.0, le=1.0)
     max_signals_per_day_per_instrument: int = Field(ge=1)
     price_drift_max_pct: float = Field(gt=0.0)
     candle_staleness_factor: float = Field(ge=1.0)
+    edge_quality: EdgeQualitySettings
 
 
 class RiskSettings(_StrictModel):

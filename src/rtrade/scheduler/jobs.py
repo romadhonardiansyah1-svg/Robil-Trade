@@ -14,6 +14,10 @@ from __future__ import annotations
 
 import structlog
 
+from rtrade.core.config import AppConfig
+from rtrade.monitoring.healthcheck import HealthChecker
+from rtrade.pipeline import run_scan, sync_calendar, track_paper_signals
+
 logger = structlog.get_logger(__name__)
 
 
@@ -28,27 +32,38 @@ async def scan_job(
     risk → guardrails → output → papertrack
     """
     logger.info("scan_job started", symbol=symbol, timeframe=timeframe)
-    # TODO: Wire full pipeline in P1 integration.
-    # This is the orchestration point that ties all modules together.
-    logger.info("scan_job completed", symbol=symbol, timeframe=timeframe)
+    result = await run_scan(symbol, timeframe)
+    logger.info(
+        "scan_job completed",
+        symbol=symbol,
+        timeframe=timeframe,
+        status=result.status,
+        signal_id=result.signal_id,
+        failures=result.failures,
+    )
 
 
 async def calendar_sync_job() -> None:
     """Sync economic calendar from Finnhub (2×/day)."""
     logger.info("calendar sync started")
-    # TODO: Fetch events from FinnhubCalendarProvider and upsert to DB.
-    logger.info("calendar sync completed")
+    count = await sync_calendar()
+    logger.info("calendar sync completed", events=count)
 
 
 async def paper_track_job() -> None:
     """Check fills/SL/TP/expiry for all PUBLISHED/FILLED signals (every 15 min)."""
     logger.info("paper tracking started")
-    # TODO: Query PUBLISHED signals, check fills against latest candles.
-    logger.info("paper tracking completed")
+    updates = await track_paper_signals()
+    logger.info("paper tracking completed", updates=updates)
 
 
 async def health_check_job() -> None:
     """Check provider availability (every 5 min)."""
     logger.info("health check started")
-    # TODO: Ping providers, DB, Redis. Alert on failure.
-    logger.info("health check completed")
+    cfg = AppConfig.load()
+    health = await HealthChecker(
+        db_url=cfg.secrets.database_url,
+        redis_url=cfg.secrets.redis_url,
+        litellm_url=cfg.secrets.litellm_base_url,
+    ).run_all()
+    logger.info("health check completed", status=health.status.value)

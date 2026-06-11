@@ -7,6 +7,7 @@ all OOS test windows (pure out-of-sample).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -88,7 +89,7 @@ def _add_months(dt: datetime, months: int) -> datetime:
 
 def run_walk_forward(
     df: pd.DataFrame,
-    signal_generator: object,
+    signal_generator: Callable[[pd.DataFrame], list[dict[str, object]]] | None,
     *,
     train_months: int = 12,
     test_months: int = 3,
@@ -137,10 +138,7 @@ def run_walk_forward(
 
         # Generate signals on test period using fixed params from train.
         # (In full implementation, optimize params on train set first.)
-        if callable(signal_generator):
-            test_signals = signal_generator(test_df)  # type: ignore[operator]
-        else:
-            test_signals = []
+        test_signals = signal_generator(test_df) if signal_generator is not None else []
 
         if not test_signals:
             continue

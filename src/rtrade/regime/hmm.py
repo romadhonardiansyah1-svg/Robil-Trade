@@ -16,9 +16,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import structlog
 from hmmlearn.hmm import GaussianHMM
@@ -74,7 +75,7 @@ class HMMRegimeDetector:
         self._last_train_ts: datetime | None = None
         self._prev_state: dict[str, HMMRegimeState] = {}
 
-    def _prepare_features(self, df: pd.DataFrame) -> np.ndarray:
+    def _prepare_features(self, df: pd.DataFrame) -> npt.NDArray[np.float64]:
         """Extract feature matrix from OHLCV DataFrame.
 
         Features:
@@ -115,7 +116,7 @@ class HMMRegimeDetector:
             }
         ).dropna()
 
-        return features.values
+        return cast(npt.NDArray[np.float64], features.to_numpy(dtype=float))
 
     def train(self, df: pd.DataFrame) -> float:
         """Train the HMM model on historical data.
@@ -274,7 +275,7 @@ class HMMRegimeDetector:
         agree = sum(1 for h, r in zip(hmm_regimes, rule_based_regimes, strict=False) if h == r)
 
         # Per-regime accuracy.
-        per_regime: dict[str, dict[str, int]] = {}
+        per_regime: dict[str, dict[str, int | float]] = {}
         for regime in Regime:
             rb_count = sum(1 for r in rule_based_regimes if r == regime)
             if rb_count > 0:

@@ -47,6 +47,12 @@ class S1TrendPullback(Strategy):
         """Add S1-specific columns (zone flags, pullback detection)."""
         ema_fast = cfg.get_int("trend.ema_fast", 21)
         ema_mid = cfg.get_int("trend.ema_mid", 50)
+        df.attrs["s1_touch_lookback_bars"] = cfg.get_int("pullback.touch_lookback_bars", 3)
+        df.attrs["s1_rsi_min"] = cfg.get_float("pullback.rsi_min", 35.0)
+        df.attrs["s1_rsi_max"] = cfg.get_float("pullback.rsi_max", 55.0)
+        df.attrs["s1_sl_swing_buffer_atr"] = cfg.get_float("levels.sl_swing_buffer_atr", 0.25)
+        df.attrs["s1_sl_fallback_atr"] = cfg.get_float("levels.sl_fallback_atr", 1.0)
+        df.attrs["s1_rr_target"] = cfg.get_float("levels.rr_target", 2.0)
 
         # Pullback zone boundaries.
         df["zone_low"] = df[f"ema{ema_fast}"]
@@ -107,7 +113,7 @@ class S1TrendPullback(Strategy):
         # Filter 3: ADX ≥ 20
         return adx >= 20
 
-    def _check_pullback_setup(self, df: pd.DataFrame, action: Action, lookback: int = 3) -> bool:
+    def _check_pullback_setup(self, df: pd.DataFrame, action: Action) -> bool:
         """Check pullback setup conditions (PLAN 8.4).
 
         5. Low candle touches/breaks pullback zone [EMA21..EMA50] within last 3 bars.
@@ -118,6 +124,9 @@ class S1TrendPullback(Strategy):
         if "zone_low" not in df.columns:
             return False
 
+        lookback = int(df.attrs.get("s1_touch_lookback_bars", 3))
+        rsi_min = float(df.attrs.get("s1_rsi_min", 35.0))
+        rsi_max = float(df.attrs.get("s1_rsi_max", 55.0))
         last_bars = df.iloc[-lookback:]
         ema21_last = float(df.iloc[-1].get("ema21", 0))
         close_last = float(df.iloc[-1]["close"])
@@ -142,14 +151,14 @@ class S1TrendPullback(Strategy):
                     zone_touched = True
                     # 6. RSI check at touch.
                     rsi = float(bar.get("rsi", 50))
-                    if 35 <= rsi <= 55:
+                    if rsi_min <= rsi <= rsi_max:
                         rsi_in_range = True
             else:  # SELL
                 # Mirror: high touches or enters zone.
                 if float(bar["high"]) >= z_min:
                     zone_touched = True
                     rsi = float(bar.get("rsi", 50))
-                    if 45 <= rsi <= 65:  # mirror RSI range
+                    if (100 - rsi_max) <= rsi <= (100 - rsi_min):  # mirror RSI range
                         rsi_in_range = True
 
         if not (zone_touched and rsi_in_range):
@@ -197,6 +206,9 @@ class S1TrendPullback(Strategy):
         ema21 = float(last["ema21"])
         zone_mid = float(last.get("zone_mid", ema21))
         atr = float(last["atr"])
+        sl_swing_buffer_atr = float(df.attrs.get("s1_sl_swing_buffer_atr", 0.25))
+        sl_fallback_atr = float(df.attrs.get("s1_sl_fallback_atr", 1.0))
+        rr_target = float(df.attrs.get("s1_rr_target", 2.0))
 
         if atr <= 0:
             raise ValueError("ATR must be positive for level computation")
@@ -211,17 +223,15 @@ class S1TrendPullback(Strategy):
             swing_lows = [p for p in swing_points if not p.is_high and p.price < entry]
             if swing_lows:
                 nearest_swing = max(swing_lows, key=lambda p: p.price)
-                sl_candidate = nearest_swing.price - 0.25 * atr
+                sl_candidate = nearest_swing.price - sl_swing_buffer_atr * atr
             else:
-                sl_candidate = entry - 1.0 * atr
+                sl_candidate = entry - sl_fallback_atr * atr
 
             # Clamp SL distance to [0.5*ATR, 3.0*ATR].
             sl_dist = entry - sl_candidate
             sl_dist_clamped = max(0.5 * atr, min(3.0 * atr, sl_dist))
             stop_loss = entry - sl_dist_clamped
 
-            # TP: entry + rr_target * (entry - SL).
-            rr_target = 2.0  # default, overridden by config in engine
             take_profit = entry + rr_target * (entry - stop_loss)
 
         else:  # SELL
@@ -231,15 +241,14 @@ class S1TrendPullback(Strategy):
             swing_highs = [p for p in swing_points if p.is_high and p.price > entry]
             if swing_highs:
                 nearest_swing = min(swing_highs, key=lambda p: p.price)
-                sl_candidate = nearest_swing.price + 0.25 * atr
+                sl_candidate = nearest_swing.price + sl_swing_buffer_atr * atr
             else:
-                sl_candidate = entry + 1.0 * atr
+                sl_candidate = entry + sl_fallback_atr * atr
 
             sl_dist = sl_candidate - entry
             sl_dist_clamped = max(0.5 * atr, min(3.0 * atr, sl_dist))
             stop_loss = entry + sl_dist_clamped
 
-            rr_target = 2.0
             take_profit = entry - rr_target * (stop_loss - entry)
 
         return LevelSet(

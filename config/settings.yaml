@@ -11,6 +11,20 @@ signal:
   price_drift_max_pct: 0.5        # GR-06: deviasi harga live vs entry
   candle_staleness_factor: 2      # GR-06: candle terakhir ≤ 2×TF
 
+  edge_quality:                   # pre-confluence adverse-selection filter
+    enabled: true
+    min_score: 65
+    max_spread_atr: 0.12          # reject spread > 12% of ATR
+    min_atr_percentile: 8         # dead market filter
+    max_atr_percentile: 96        # volatility shock filter
+    max_opposing_wick_ratio: 0.62 # rejection wick against trade direction
+    max_total_wick_body_ratio: 6
+    min_body_atr: 0.03
+    min_volume_ratio: 0.55
+    volume_window: 20
+    max_range_expansion_atr: 2.8
+    max_entry_distance_atr: 1.25
+
 risk:
   risk_per_trade_pct: 1.0         # default saran sizing (hard cap 2.0 — GR-05)
   rr_min: 1.5                     # GR-03 hard floor (config < 1.5 ditolak)

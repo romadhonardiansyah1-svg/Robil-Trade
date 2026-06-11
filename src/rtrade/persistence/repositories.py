@@ -11,7 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -143,6 +143,23 @@ class CandleRepo:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def latest_n(
+        self,
+        instrument_id: int,
+        timeframe: Timeframe,
+        limit: int,
+    ) -> list[Candle]:
+        """Latest N candles, returned ascending by timestamp."""
+        stmt = (
+            select(Candle)
+            .where(Candle.instrument_id == instrument_id, Candle.timeframe == timeframe.value)
+            .order_by(Candle.ts.desc())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        candles = list(result.scalars().all())
+        return list(reversed(candles))
+
 
 class EventRepo:
     def __init__(self, session: AsyncSession) -> None:
@@ -180,6 +197,78 @@ class SignalRepo:
         stmt = select(Signal).order_by(Signal.bar_ts.desc()).limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_by_dedup(
+        self,
+        *,
+        instrument_id: int,
+        timeframe: str,
+        strategy: str,
+        bar_ts: datetime,
+    ) -> Signal | None:
+        stmt = select(Signal).where(
+            Signal.instrument_id == instrument_id,
+            Signal.timeframe == timeframe,
+            Signal.strategy == strategy,
+            Signal.bar_ts == ensure_utc(bar_ts),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def count_since(
+        self,
+        *,
+        instrument_id: int,
+        start: datetime,
+        end: datetime,
+    ) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Signal)
+            .where(
+                Signal.instrument_id == instrument_id,
+                Signal.bar_ts >= ensure_utc(start),
+                Signal.bar_ts < ensure_utc(end),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def recent_outcomes(self, strategy: str, limit: int) -> list[float]:
+        stmt = (
+            select(Signal.outcome_r)
+            .where(Signal.strategy == strategy, Signal.outcome_r.is_not(None))
+            .order_by(Signal.resolved_at.desc().nullslast())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        return [float(r) for r in result.scalars().all() if r is not None]
+
+    async def open_for_tracking(self) -> list[Signal]:
+        stmt = (
+            select(Signal)
+            .where(Signal.status.in_(("PUBLISHED", "FILLED")))
+            .order_by(Signal.bar_ts.asc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def update_tracking_status(
+        self,
+        signal_id: str,
+        *,
+        status: str,
+        resolved_at: datetime,
+        outcome_r: Decimal | None = None,
+    ) -> None:
+        values: dict[str, object] = {
+            "status": status,
+            "resolved_at": ensure_utc(resolved_at),
+        }
+        if outcome_r is not None:
+            values["outcome_r"] = outcome_r
+        stmt = update(Signal).where(Signal.signal_id == signal_id).values(**values)
+        await self._session.execute(stmt)
 
 
 class AuditRepo:

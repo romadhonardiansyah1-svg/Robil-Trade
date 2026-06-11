@@ -20,4 +20,4 @@ repos:
         entry: .env files must never be committed (PLAN §0.8)
         language: fail
         files: '^\.env(\..*)?$'
-        exclude: '^\.env\.example$'
+        exclude: '^\.env(\.prod)?\.example$'

@@ -1,0 +1,37 @@
+# Docker build context exclusions
+.git
+.github
+.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+__pycache__
+*.py[cod]
+
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.prod.example
+
+# Dev artifacts
+htmlcov/
+.coverage*
+data/
+reports/
+logs/
+*.sqlite*
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs (not needed in runtime image)
+docs/
+*.md
+!README.md

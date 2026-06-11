@@ -1,0 +1,22 @@
+# S2 Range Mean-Reversion Configuration
+# PLAN §8.4 — Aktif hanya saat regime RANGE (ADX < 20)
+
+range:
+  adx_max: 20                    # Maximum ADX for range regime
+  band_lookback: 100             # Bars to compute S/R band
+  donchian_period: 20            # Period for Donchian channel width
+  stability_lookback: 30         # Bars to check band width stability
+  stability_max_change_pct: 30   # Max % change in Donchian width (stability)
+
+entry:
+  rsi_oversold: 35               # RSI threshold for LONG (oversold)
+  rsi_overbought: 65             # RSI threshold for SHORT (overbought)
+  band_tolerance_atr_mult: 0.5   # Price must be within band ± this × ATR
+
+levels:
+  sl_atr_mult: 1.0               # SL distance = 1.0 × ATR from band edge
+  rr_min: 1.5                    # Minimum R:R (else DISCARD)
+  valid_bars: 6                  # Signal valid for N bars of 1H
+
+news:
+  hard_block_hours: 12           # Block if high-impact event < N hours ahead

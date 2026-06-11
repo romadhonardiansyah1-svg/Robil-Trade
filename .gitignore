@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.prod.example
 
 # Python
 __pycache__/
@@ -24,6 +25,18 @@ data/
 *.sqlite
 *.sqlite3
 
+# Production artifacts (generated)
+reports/
+logs/
+
+# ML models
+*.joblib
+*.pkl
+
 # IDE
 .idea/
 .vscode/
+
+# OS
+.DS_Store
+Thumbs.db

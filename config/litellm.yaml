@@ -1,0 +1,43 @@
+# LiteLLM Router Configuration — Robil Trade
+# Ref: IMPLEMENTATION_PLAN §8.9.2, ADR-005, ADR-010
+#
+# Model aliases (aplikasi hanya tahu alias, tidak provider):
+#   trading-analyst  → Gemini 3.1 Flash-Lite (murah, cepat)
+#   trading-critic   → Gemini 3.1 Flash-Lite (fallback until Anthropic key available)
+#   trading-backup   → Gemini 3.1 Flash-Lite
+
+model_list:
+  - model_name: trading-analyst
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_1
+
+  - model_name: trading-critic
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_1
+
+  # When Anthropic key is available, uncomment:
+  # - model_name: trading-critic
+  #   litellm_params:
+  #     model: anthropic/claude-sonnet-4-6
+  #     api_key: os.environ/ANTHROPIC_API_KEY_1
+
+  - model_name: trading-backup
+    litellm_params:
+      model: gemini/gemini-3.1-flash-lite
+      api_key: os.environ/GEMINI_API_KEY_1
+
+router_settings:
+  routing_strategy: least-busy
+  num_retries: 2
+  timeout: 30
+  allowed_fails: 3
+  cooldown_time: 60
+
+litellm_settings:
+  fallbacks:
+    - trading-analyst: [trading-backup]
+    - trading-critic: [trading-backup]
+  drop_params: true
+  set_verbose: false

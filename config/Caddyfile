@@ -1,0 +1,81 @@
+# ============================================================================
+# Caddy Reverse Proxy — Robil Trade
+# Ref: IMPLEMENTATION_PLAN §13, P4-T2
+#
+# Features:
+# - Auto TLS (Let's Encrypt) for API
+# - Basic auth for API endpoints
+# - Rate limiting on scan endpoint
+# - Security headers
+#
+# USAGE: Replace {$DOMAIN} with your actual domain in .env:
+#   DOMAIN=robil-trade.yourdomain.com
+# ============================================================================
+
+# API endpoint — HTTPS with auth
+{$DOMAIN:localhost} {
+    # Security headers.
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Health check — no auth required.
+    handle /health {
+        reverse_proxy api:8000
+    }
+
+    # Metrics endpoint — no auth required (internal only via firewall).
+    handle /metrics {
+        reverse_proxy api:8000
+    }
+
+    # All other API endpoints — require bearer token.
+    handle /api/* {
+        @no_auth {
+            not header Authorization "Bearer {$API_AUTH_TOKEN:changeme}"
+        }
+        respond @no_auth 401 {
+            body "Unauthorized"
+            close
+        }
+        reverse_proxy api:8000
+    }
+
+    # Scan endpoint — auth + rate limit.
+    handle /scan {
+        @no_auth {
+            not header Authorization "Bearer {$API_AUTH_TOKEN:changeme}"
+        }
+        respond @no_auth 401 {
+            body "Unauthorized"
+            close
+        }
+        reverse_proxy api:8000
+    }
+
+    # Calibration endpoint.
+    handle /calibration {
+        reverse_proxy api:8000
+    }
+
+    # Catch-all: return 404.
+    handle {
+        respond 404 {
+            body "Not Found"
+            close
+        }
+    }
+
+    # Logging.
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 50MiB
+            roll_keep 5
+        }
+        format json
+    }
+}

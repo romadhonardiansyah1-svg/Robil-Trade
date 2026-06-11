@@ -41,7 +41,7 @@ class TestRealConfigFiles:
 
     def test_instruments(self, config_dir: Path) -> None:
         cfg = AppConfig.load(config_dir=config_dir, env_file=None)
-        assert len(cfg.instruments) == 3
+        assert len(cfg.instruments) == 6  # P1: 3 + P3: 3
         xau = cfg.instrument("XAUUSD")
         assert xau.market == Market.METALS
         assert xau.provider == "twelvedata"

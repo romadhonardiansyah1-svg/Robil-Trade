@@ -35,6 +35,10 @@ class LLMOutputError(RTradeError):
     """LLM returned output that failed schema validation after retry."""
 
 
+class LLMUnavailableError(RTradeError):
+    """All LLM providers failed (timeout, auth, rate-limit)."""
+
+
 class GuardrailViolation(RTradeError):
     """A guardrail gate failed. Carries the gate id (e.g. 'GR-04')."""
 

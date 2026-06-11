@@ -1,0 +1,39 @@
+# ============================================================================
+# Definisi instrumen — IMPLEMENTATION_PLAN.md §7.2.
+# P3: tambah GBPUSD, USDJPY, ETHUSDT setelah P1 stabil.
+# ============================================================================
+
+instruments:
+  - symbol: XAUUSD
+    market: metals
+    provider: twelvedata
+    provider_symbol: "XAU/USD"
+    timeframes: ["1h", "4h"]
+    context_timeframe: "1d"
+    pip_size: 0.01            # 1 cent
+    quote_currency: USD
+    related_currencies: [USD]   # untuk news blackout
+    session_filter: true        # hanya sinyal saat likuiditas (London+NY)
+
+  - symbol: EURUSD
+    market: forex
+    provider: twelvedata
+    provider_symbol: "EUR/USD"
+    timeframes: ["1h", "4h"]
+    context_timeframe: "1d"
+    pip_size: 0.0001
+    quote_currency: USD
+    related_currencies: [EUR, USD]
+    session_filter: true
+
+  - symbol: BTCUSDT
+    market: crypto
+    provider: ccxt_binance
+    provider_symbol: "BTC/USDT"
+    timeframes: ["1h", "4h"]
+    context_timeframe: "1d"
+    pip_size: 0.1
+    quote_currency: USDT
+    related_currencies: [USD]   # crypto tetap kena blackout FOMC/CPI/NFP
+    session_filter: false       # 24/7
+    derivatives: true           # funding rate + OI dari Binance Futures

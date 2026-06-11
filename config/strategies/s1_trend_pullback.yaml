@@ -1,0 +1,37 @@
+# ============================================================================
+# Parameter Strategi S1 — Trend-Pullback (IMPLEMENTATION_PLAN.md §8.4).
+# Diimplementasikan di P1-T7. Parameter HANYA boleh dituning via walk-forward
+# harness (PLAN §8.11.3) — dilarang tuning manual terhadap test set.
+# ============================================================================
+
+strategy: s1_trend_pullback
+timeframe_signal: "1h"
+timeframe_confirm: "4h"
+
+trend:
+  ema_fast: 21
+  ema_mid: 50
+  ema_slow: 200
+  adx_period: 14
+  adx_min: 20
+
+pullback:
+  zone_low_ema: 21          # zona pullback = [EMA21 .. EMA50]
+  zone_high_ema: 50
+  touch_lookback_bars: 3
+  rsi_period: 14
+  rsi_min: 35
+  rsi_max: 55
+
+levels:
+  sl_swing_buffer_atr: 0.25
+  sl_fallback_atr: 1.0
+  rr_target: 2.0
+  valid_bars: 6             # limit tak tersentuh dalam 6 bar → sinyal expired
+
+confluence_weights:         # total 100 — §8.6
+  trend: 25
+  momentum: 20
+  structure: 20
+  volume: 15
+  macro: 20

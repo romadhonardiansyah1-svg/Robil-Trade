@@ -1,0 +1,43 @@
+# ============================================================================
+# Robil Trade — setting non-secret. Semua threshold di sini, BUKAN hardcode.
+# Nilai default dari IMPLEMENTATION_PLAN.md §7.3. Batas keras (GR-*) divalidasi
+# oleh rtrade.core.config — config yang melemahkan guardrail akan DITOLAK saat load.
+# ============================================================================
+
+signal:
+  confluence_min_score: 60        # 0-100, di bawah ini tidak jadi kandidat
+  confidence_min: 0.55            # GR-09: di bawah ini → ABSTAIN
+  max_signals_per_day_per_instrument: 3   # GR-12
+  price_drift_max_pct: 0.5        # GR-06: deviasi harga live vs entry
+  candle_staleness_factor: 2      # GR-06: candle terakhir ≤ 2×TF
+
+risk:
+  risk_per_trade_pct: 1.0         # default saran sizing (hard cap 2.0 — GR-05)
+  rr_min: 1.5                     # GR-03 hard floor (config < 1.5 ditolak)
+  rr_target: 2.0                  # target TP default
+  sl_atr_min: 0.5                 # GR-04
+  sl_atr_max: 3.0                 # GR-04 hard cap (config > 3.0 ditolak)
+  news_blackout_before_min: 30    # GR-07
+  news_blackout_after_min: 15
+  expectancy_guard_window: 30     # GR-13: rolling N paper-trades
+
+llm:
+  enabled: false                  # P1=false, P2=true
+  analyst_model: trading-analyst
+  critic_model: trading-critic
+  temperature: 0.2
+  max_confidence_adjust: 0.15     # LLM hanya boleh geser confidence ±0.15
+  timeout_seconds: 45
+
+backtest:
+  min_trades_for_validation: 100
+  walkforward:
+    train_months: 12
+    test_months: 3
+    step_months: 3
+  gates:                          # §8.11.4
+    oos_expectancy_after_costs: "> 0"
+    oos_profit_factor: ">= 1.15"
+    deflated_sharpe_prob: ">= 0.90"
+    pbo_max: 0.30
+    max_drawdown_pct: 25

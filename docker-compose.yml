@@ -1,0 +1,36 @@
+name: robil-trade
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: rtrade
+      POSTGRES_PASSWORD: ${RTRADE_DB_PASSWORD:-rtrade}
+      POSTGRES_DB: rtrade
+    ports:
+      # Bind ke loopback saja — DB tidak pernah terekspos keluar host (PLAN §13).
+      - "127.0.0.1:${RTRADE_DB_PORT:-5432}:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rtrade -d rtrade"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${RTRADE_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  dbdata:
+  redisdata:

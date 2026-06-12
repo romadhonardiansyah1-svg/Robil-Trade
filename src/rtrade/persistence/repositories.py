@@ -347,6 +347,20 @@ class AuditRepo:
         detail: dict[str, Any],
         signal_id: str | None = None,
     ) -> None:
+        # S9: hash chain — get prev_hash from last audit row
+        from rtrade.persistence.audit_chain import build_chain_entry
+
+        prev_hash = "genesis"
+        last = await self._session.execute(
+            select(SignalAudit).order_by(SignalAudit.id.desc()).limit(1)
+        )
+        last_row = last.scalar_one_or_none()
+        if last_row is not None and isinstance(last_row.detail, dict):
+            chain = last_row.detail.get("_chain", {})
+            prev_hash = chain.get("row_hash", "genesis")
+
+        chain_entry = build_chain_entry(prev_hash, stage, ok, signal_id, detail)
+        detail["_chain"] = chain_entry
         self._session.add(SignalAudit(signal_id=signal_id, stage=stage, ok=ok, detail=detail))
 
 

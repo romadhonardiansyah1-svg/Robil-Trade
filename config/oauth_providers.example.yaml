@@ -1,0 +1,112 @@
+# OAuth Provider Profiles — Manifest Hermes-style
+# Satu file tunggal yang mendefinisikan semua provider OAuth yang didukung.
+# File ini adalah config template (salin ke config/oauth_providers.yaml untuk prod).
+
+oauth_providers:
+
+  google_vertex:
+    label: "Google Vertex AI (Gemini, Claude via Model Garden)"
+    auth_mode: vertex          # Google ADC, bukan generic OAuth2
+    capability: vertex_adc
+    enabled: true
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: "Login via `rtrade auth login --provider google` → ADC tersimpan otomatis."
+    login_flow: loopback
+    requires_official_oauth: true
+    transport: HTTPS
+    models:
+      - vertex_ai/gemini-2.5-pro
+      - vertex_ai/gemini-2.5-flash
+      - vertex_ai/gemini-2.0-flash
+      - vertex_ai/claude-opus-4-1
+      - vertex_ai/claude-sonnet-4-5
+
+  azure_openai:
+    label: "Azure OpenAI Service"
+    auth_mode: azure_ad
+    capability: azure_ad_client_credentials
+    enabled: false
+    token_url_env: ""
+    client_id_env: AZURE_CLIENT_ID
+    scopes_env: AZURE_OPENAI_SCOPES
+    device_auth_url_env: ""
+    note: "Butuh azure-identity package + env AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET."
+    login_flow: ""
+    requires_official_oauth: true
+    transport: HTTPS
+    models:
+      - azure/gpt-4.1
+      - azure/gpt-4.1-mini
+
+  generic_gateway:
+    label: "OAuth Gateway (Enterprise / Self-hosted)"
+    auth_mode: oauth2
+    capability: oauth_gateway
+    enabled: false
+    token_url_env: RTRADE_OAUTH_TOKEN_URL
+    client_id_env: RTRADE_OAUTH_CLIENT_ID
+    scopes_env: RTRADE_OAUTH_SCOPES
+    device_auth_url_env: RTRADE_OAUTH_DEVICE_URL
+    note: "Untuk gateway yang menyediakan endpoint /v1/chat/completions + OAuth2."
+    login_flow: device_code
+    requires_official_oauth: true
+    transport: HTTPS
+    models_url_env: RTRADE_OAUTH_MODELS_URL
+
+  codex_openai:
+    label: "OpenAI / Codex (via official OAuth or gateway)"
+    auth_mode: oauth2
+    capability: disabled_unsupported
+    enabled: false
+    token_url_env: RTRADE_OPENAI_OAUTH_TOKEN_URL
+    client_id_env: RTRADE_OPENAI_OAUTH_CLIENT_ID
+    scopes_env: RTRADE_OPENAI_OAUTH_SCOPES
+    device_auth_url_env: RTRADE_OPENAI_OAUTH_DEVICE_URL
+    note: >
+      DILARANG membaca token Codex CLI, ChatGPT session, atau browser credential.
+      Aktif HANYA bila endpoint OAuth resmi/gateway enterprise dikonfigurasi.
+    login_flow: paste_url
+    requires_official_oauth: true
+    transport: HTTPS
+    models:
+      - openai/gpt-4.1
+      - openai/gpt-4.1-mini
+
+  xai:
+    label: "xAI (Grok)"
+    auth_mode: oauth2
+    capability: disabled_unsupported
+    enabled: false
+    token_url_env: RTRADE_XAI_OAUTH_TOKEN_URL
+    client_id_env: RTRADE_XAI_OAUTH_CLIENT_ID
+    scopes_env: RTRADE_XAI_OAUTH_SCOPES
+    device_auth_url_env: RTRADE_XAI_OAUTH_DEVICE_URL
+    note: >
+      API key resmi (dari console.x.ai) didukung langsung tanpa OAuth.
+      OAuth mode aktif hanya bila endpoint resmi tersedia.
+    login_flow: device_code
+    requires_official_oauth: true
+    transport: HTTPS
+    models_url_env: RTRADE_XAI_MODELS_URL
+
+  custom_external:
+    label: "Custom Hermes-like External Adapter"
+    auth_mode: external_command
+    capability: external_adapter
+    enabled: false
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: "Provider kustom via external command yang mengembalikan JSON token di stdout."
+    login_flow: external_command
+    requires_official_oauth: false
+    transport: HTTPS
+    external_command:
+      - "${RTRADE_AUTH_ADAPTER_BIN}"
+      - "login"
+      - "--provider"
+      - "custom"

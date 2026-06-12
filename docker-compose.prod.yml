@@ -1,7 +1,7 @@
 # ============================================================================
 # Robil Trade — Production Docker Compose Overlay
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-# Ref: IMPLEMENTATION_PLAN §13
+# Ref: IMPLEMENTATION_PLAN §13, D1–D5
 # ============================================================================
 
 services:
@@ -32,35 +32,7 @@ services:
         limits:
           memory: 512M
 
-  # === LiteLLM Proxy ===
-  litellm:
-    image: ghcr.io/berriai/litellm:main-latest
-    restart: unless-stopped
-    environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
-      GEMINI_API_KEY_1: ${GEMINI_API_KEY_1}
-      GEMINI_API_KEY_2: ${GEMINI_API_KEY_2:-}
-      ANTHROPIC_API_KEY_1: ${ANTHROPIC_API_KEY_1:-}
-      OPENAI_API_KEY_1: ${OPENAI_API_KEY_1:-}
-    volumes:
-      - ./config/litellm.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000"]
-    networks:
-      - internal
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:4000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  # === Main Application (Scheduler + API) ===
+  # === Main Application (Scheduler) ===
   app:
     build:
       context: .
@@ -72,11 +44,11 @@ services:
       LOG_LEVEL: INFO
       DATABASE_URL: postgresql+asyncpg://rtrade:${RTRADE_DB_PASSWORD}@db:5432/rtrade
       REDIS_URL: redis://redis:6379/0
-      LITELLM_BASE_URL: http://litellm:4000
     volumes:
       - ./reports:/app/reports
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./models:/app/models
     networks:
       - internal
     depends_on:
@@ -84,8 +56,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      litellm:
-        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import rtrade.scheduler.main"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
     deploy:
       resources:
         limits:
@@ -103,8 +78,7 @@ services:
       LOG_LEVEL: INFO
       DATABASE_URL: postgresql+asyncpg://rtrade:${RTRADE_DB_PASSWORD}@db:5432/rtrade
       REDIS_URL: redis://redis:6379/0
-      LITELLM_BASE_URL: http://litellm:4000
-    command: ["python", "-m", "uvicorn", "rtrade.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    command: ["python", "-m", "uvicorn", "rtrade.delivery.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     networks:
       - internal
     depends_on:
@@ -112,10 +86,40 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     deploy:
       resources:
         limits:
           memory: 1G
+
+  # === Telegram Bot (polling) ===
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    profiles: ["telegram"]
+    env_file: .env
+    environment:
+      ENV: prod
+      LOG_LEVEL: INFO
+      DATABASE_URL: postgresql+asyncpg://rtrade:${RTRADE_DB_PASSWORD}@db:5432/rtrade
+      REDIS_URL: redis://redis:6379/0
+    command: ["python", "-m", "rtrade.cli.bot"]
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   # === Caddy Reverse Proxy (TLS + Auth) ===
   caddy:
@@ -124,6 +128,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-changeme}
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

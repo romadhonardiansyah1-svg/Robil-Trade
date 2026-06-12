@@ -100,7 +100,7 @@ async def health_check_job() -> None:
     health = await HealthChecker(
         db_url=cfg.secrets.database_url,
         redis_url=cfg.secrets.redis_url,
-        litellm_url=cfg.secrets.litellm_base_url,
+        litellm_url="",  # library mode — no proxy (D2)
     ).run_all()
     logger.info("health check completed", status=health.status.value)
 

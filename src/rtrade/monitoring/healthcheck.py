@@ -91,7 +91,9 @@ class HealthChecker:
 
         checks.append(await self.check_database())
         checks.append(await self.check_redis())
-        checks.append(await self.check_litellm())
+        litellm_check = await self.check_litellm()
+        if litellm_check is not None:
+            checks.append(litellm_check)
         checks.append(self.check_disk())
 
         # Determine overall status.
@@ -168,8 +170,10 @@ class HealthChecker:
                 latency_ms=elapsed,
             )
 
-    async def check_litellm(self) -> CheckResult:
-        """Check LiteLLM proxy health."""
+    async def check_litellm(self) -> CheckResult | None:
+        """Check LiteLLM proxy health. Skip entirely when no proxy is configured (library mode)."""
+        if not self._litellm_url:
+            return None
         import time
 
         start = time.monotonic()

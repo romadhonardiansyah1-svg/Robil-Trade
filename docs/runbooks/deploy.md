@@ -1,143 +1,105 @@
-# Runbook: Deploy Robil Trade ke VPS
+# Deploy Runbook — Robil Trade (D9)
 
-## 🚀 Quick Deploy (Hermes-Style — 1 Command)
+> Semua langkah sesuai stack final pasca-D1–D8. Terakhir diperbarui: 2026-06-12.
 
-### Setup Pertama Kali
+---
 
-SSH ke VPS, lalu jalankan:
+## 1. Setup Awal (Sekali Jalan)
 
+### Opsi A: Auto-setup (recommended)
 ```bash
-ssh robil-vps
-
-# Download dan jalankan setup script
-curl -sSL https://raw.githubusercontent.com/romadhonardiansyah1-svg/Robil-Trade/main/scripts/setup_vps.sh -o /tmp/setup_vps.sh
-chmod +x /tmp/setup_vps.sh
-sudo /tmp/setup_vps.sh
+curl -sSL https://raw.githubusercontent.com/romadhonardiansyah1-svg/Robil-Trade/main/scripts/setup_vps.sh | sudo bash
 ```
 
-Script ini akan **otomatis**:
-1. ✅ Cek system requirements (CPU/RAM/Disk)
-2. ✅ Install Docker, UFW, fail2ban
-3. ✅ Configure firewall (SSH + HTTP/HTTPS only)
-4. ✅ Buat user `rtrade` + direktori
-5. ✅ Clone repo dari GitHub
-6. ✅ Prompt untuk API keys (auto-generate secrets)
-7. ✅ Build & start semua 7 Docker containers
-8. ✅ Run database migrations
-9. ✅ Setup log rotation
-10. ✅ Verify semua service healthy
-
-### Update (Setelah Setup Awal)
-
+### Opsi B: Manual
 ```bash
-ssh robil-vps
+git clone --depth 1 https://github.com/romadhonardiansyah1-svg/Robil-Trade.git /opt/robil-trade
 cd /opt/robil-trade
+sudo ./scripts/setup_vps.sh
+```
+
+Script akan:
+1. Cek prerequisites (Docker, CPU, RAM)
+2. Setup firewall (SSH + HTTP/HTTPS)
+3. Clone repo + buat user `rtrade`
+4. Generate secrets → `.env` (chmod 600)
+5. Build & start semua container
+6. Jalankan Alembic migration
+7. Tampilkan status service
+
+---
+
+## 2. Pasca-Setup
+
+### Backfill data
+```bash
+chmod +x scripts/*.sh
+./scripts/backfill_all.sh
+```
+
+### Validasi walk-forward
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  exec app python scripts/run_backtest.py --strategy s1_trend_pullback --instrument BTCUSDT --walkforward --smart-exit
+```
+
+Isi hasil di `docs/VALIDATION_RESULTS.md`.
+
+### Nyalakan LLM
+```bash
+# Edit config/settings.yaml → llm.enabled: true
 sudo ./scripts/update.sh
 ```
 
-### Cek Status
+---
 
-```bash
-ssh robil-vps
-cd /opt/robil-trade
-./scripts/status.sh
-```
+## 3. Operasi Harian
+
+| Perintah | Fungsi |
+|----------|--------|
+| `make prod-logs` | Lihat log semua service |
+| `make prod-health` | Cek `/health` endpoint |
+| `./scripts/status.sh` | Status container |
+| `make backup-list` | Lihat daftar backup (auto 03:00 UTC) |
 
 ---
 
-## 📋 Manual Deploy (Step-by-Step)
-
-Jika lebih suka manual, ikuti langkah di bawah.
-
-### Prerequisites
-
-- VPS Ubuntu 24.04 (4 vCPU / 8GB RAM / 190GB disk)
-- Docker + Docker Compose terinstall
-- SSH access: `ssh robil-vps`
-- Domain (opsional, untuk TLS auto)
-
-### 1. Persiapan Server (Sekali)
+## 4. Update Kode
 
 ```bash
-ssh robil-vps
-
-# Update sistem
-apt update && apt upgrade -y
-
-# Install Docker
-curl -fsSL https://get.docker.com | sh
-
-# Firewall
-ufw allow OpenSSH
-ufw allow 80
-ufw allow 443
-ufw enable
-
-# User non-root
-adduser rtrade --disabled-password
-usermod -aG docker rtrade
-
-# Buat direktori
-mkdir -p /opt/robil-trade
-chown rtrade:rtrade /opt/robil-trade
+sudo ./scripts/update.sh
 ```
-
-### 2. Deploy
-
-```bash
-# Clone repo
-git clone https://github.com/romadhonardiansyah1-svg/Robil-Trade.git /opt/robil-trade
-cd /opt/robil-trade
-
-# Buat .env dari template
-cp .env.prod.example .env
-nano .env  # Isi semua credentials
-chmod 600 .env
-
-# Build dan start
-make deploy
-```
-
-### 3. Verifikasi
-
-```bash
-# Status semua container
-make prod-ps
-
-# Health check
-make prod-health
-
-# Logs
-make prod-logs
-
-# Kirim /health di Telegram
-```
+Script ini: `git pull` → `docker compose build` → `docker compose up -d` → migrations.
 
 ---
 
-## 🔧 Useful Commands
+## 5. Rollback
 
-| Command | Deskripsi |
-|---------|-----------|
-| `make prod` | Start/rebuild production stack |
-| `make prod-down` | Stop semua services |
-| `make prod-logs` | Tail logs (semua services) |
-| `make prod-ps` | Status containers |
-| `make prod-health` | API health check |
-| `make deploy` | Full deploy: build + start + migrate |
-| `make backup` | Trigger manual backup |
-| `./scripts/status.sh` | Full system diagnostic |
-| `./scripts/update.sh` | Pull + rebuild + restart |
+Lihat `docs/runbooks/rollback.md`.
 
 ---
 
-## 🚨 Troubleshooting
+## 6. Matriks Port
 
-| Masalah | Solusi |
-|---------|--------|
-| Container restart loop | `docker logs <container>` — cek error |
-| DB connection refused | Pastikan db container healthy, cek `DATABASE_URL` |
-| LiteLLM unhealthy | Cek API key valid, `docker logs litellm` |
-| Port 443 tidak bisa bind | Pastikan Caddy punya akses, cek `ufw status` |
-| Out of memory | `docker stats` — cek memory limits di compose |
-| Permission denied | Pastikan user `rtrade` di group `docker` |
+| Port | Akses | Service |
+|------|-------|---------|
+| 80/443 | Publik (Caddy) | API via reverse proxy |
+| 8000 | Internal only | uvicorn (api container) |
+| 5432 | Internal only | PostgreSQL |
+| 6379 | Internal only | Redis |
+
+---
+
+## 7. Service Stack
+
+| Service | Container | Profile | Healthcheck |
+|---------|-----------|---------|-------------|
+| db | timescaledb:pg16 | default | pg_isready |
+| redis | redis:7-alpine | default | redis-cli ping |
+| app | rtrade (scheduler) | default | `python -c "import rtrade.scheduler.main"` |
+| api | rtrade (uvicorn) | default | curl /health |
+| caddy | caddy:2-alpine | default | — |
+| backup | postgres:16-alpine | default | — |
+| bot | rtrade (telegram) | `telegram` | — |
+
+Tanpa Telegram token → 6 service. Dengan token → `--profile telegram` → 7 service.

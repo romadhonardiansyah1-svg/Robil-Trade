@@ -193,7 +193,7 @@ def run_walkforward_harness(
         test_mask = wf_df.index >= test_start_ts
         if not test_mask.any():
             continue
-        first_test_iloc = int(test_mask.values.argmax())  # type: ignore[union-attr]
+        first_test_iloc = int(test_mask.values.argmax())
 
         # Generate signals on the full wf_df (indicators warm from warmup).
         raw_signals = generate_signals(
@@ -201,7 +201,7 @@ def run_walkforward_harness(
         )
 
         # Discard signals that fall in the warmup zone (before test start).
-        test_signals = [s for s in raw_signals if int(s["bar_index"]) >= first_test_iloc]
+        test_signals = [s for s in raw_signals if int(str(s["bar_index"])) >= first_test_iloc]
 
         if not test_signals:
             per_window.append(

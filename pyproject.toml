@@ -36,6 +36,10 @@ dependencies = [
     "hmmlearn>=0.3",
     "scikit-learn>=1.5",
     "xgboost>=2.1",
+    # --- P4 additions (OAuth auth layer) ---
+    "google-auth>=2.35",
+    "google-auth-oauthlib>=1.2",
+    "cryptography>=43.0",
 ]
 
 [dependency-groups]
@@ -115,6 +119,12 @@ module = [
     "pandas.*",
     "sklearn",
     "sklearn.*",
+    "google.auth",
+    "google.auth.*",
+    "google.oauth2",
+    "google.oauth2.*",
+    "google_auth_oauthlib",
+    "google_auth_oauthlib.*",
 ]
 ignore_missing_imports = true
 

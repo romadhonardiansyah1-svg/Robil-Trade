@@ -106,6 +106,9 @@ def create_scheduler() -> AsyncIOScheduler:
 
 async def run_worker() -> None:
     """Main worker entrypoint."""
+    from rtrade.core.logging_setup import configure_logging
+
+    configure_logging()
     logger.info("starting Robil Trade worker")
 
     scheduler = create_scheduler()

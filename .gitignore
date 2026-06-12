@@ -29,6 +29,11 @@ data/
 reports/
 logs/
 
+# OAuth token store + secrets (O2)
+.rtrade/
+*.token
+secrets/
+
 # ML models
 *.joblib
 *.pkl

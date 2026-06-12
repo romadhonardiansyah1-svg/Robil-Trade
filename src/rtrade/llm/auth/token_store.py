@@ -44,9 +44,13 @@ def _fernet():  # type: ignore[no-untyped-def]
 
 
 def save_token(provider: str, token: StoredToken) -> None:
+    # S3: fail-closed in prod — token store MUST be encrypted
+    is_prod = os.environ.get("ENV", "dev") == "prod"
     path = _token_dir() / f"{provider}.json"
     raw = json.dumps(asdict(token)).encode()
     f = _fernet()
+    if f is None and is_prod:
+        raise RuntimeError("RTRADE_TOKEN_KEY wajib di prod — token tidak boleh plaintext")
     data = f.encrypt(raw) if f is not None else raw
     if f is None:
         logger.warning("RTRADE_TOKEN_KEY kosong — token disimpan plaintext", provider=provider)
@@ -77,3 +81,30 @@ def delete_token(provider: str) -> bool:
         path.unlink()
         return True
     return False
+
+
+def rotate_key(old_key: str, new_key: str) -> int:
+    """Re-encrypt all token files from old_key to new_key (S3).
+
+    Returns number of files rotated.
+    """
+    from cryptography.fernet import Fernet
+
+    old_f = Fernet(old_key.encode()) if old_key else None
+    new_f = Fernet(new_key.encode())
+    token_dir = _token_dir()
+    count = 0
+    for path in token_dir.glob("*.json"):
+        data = path.read_bytes()
+        try:
+            raw = old_f.decrypt(data) if old_f else data
+        except Exception:
+            logger.warning("skip — gagal dekripsi", path=str(path))
+            continue
+        encrypted = new_f.encrypt(raw)
+        path.write_bytes(encrypted)
+        if sys.platform != "win32":
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        count += 1
+    logger.info("key rotation selesai", rotated=count)
+    return count

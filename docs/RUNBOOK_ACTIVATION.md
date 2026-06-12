@@ -1,4 +1,4 @@
-# RUNBOOK: Aktivasi Infrastruktur Robil Trade (V4)
+# RUNBOOK: Aktivasi Infrastruktur Robil Trade (V4 / D6)
 
 > **PENTING**: File ini adalah instruksi untuk USER. Jangan commit `.env` atau secret apa pun ke Git.
 
@@ -6,22 +6,20 @@
 
 ## 1. Environment Variables (`.env`)
 
-Buat file `.env` di root project (`c:\Robil Trade\robil-trade\.env`):
+Buat file `.env` di root project:
 
 ```dotenv
 # Database
-DATABASE_URL=postgresql+asyncpg://rtrade:YOUR_PASSWORD@localhost:5432/rtrade
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
+RTRADE_DB_PASSWORD=your_strong_password_here
+DATABASE_URL=postgresql+asyncpg://rtrade:YOUR_PASSWORD@db:5432/rtrade
+REDIS_URL=redis://redis:6379/0
 
 # Data Providers
 TWELVEDATA_API_KEY=your_twelvedata_key_here
 FINNHUB_API_KEY=your_finnhub_key_here
 
-# LLM
+# LLM (library mode — no proxy needed)
 GEMINI_API_KEY_1=your_gemini_api_key_here
-LITELLM_BASE_URL=http://localhost:4000
 
 # Telegram
 TELEGRAM_BOT_TOKEN=your_bot_token_here
@@ -29,6 +27,7 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 
 # API Auth
 API_AUTH_TOKEN=your_random_auth_token_here
+DOMAIN=localhost
 ```
 
 ---
@@ -55,38 +54,50 @@ docker compose ps  # db dan redis harus STATUS "running"
 ### 3a. Crypto (gratis, cepat — jalankan dulu)
 
 ```powershell
-# BTCUSDT 1h, 3 tahun
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol BTCUSDT --tf 1h --years 3
+# BTCUSDT 1h, 3 tahun (1095 hari)
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill BTCUSDT 1h --days 1095
 
 # BTCUSDT 4h
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol BTCUSDT --tf 4h --years 3
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill BTCUSDT 4h --days 1095
 
 # ETHUSDT 1h + 4h
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol ETHUSDT --tf 1h --years 3
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol ETHUSDT --tf 4h --years 3
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill ETHUSDT 1h --days 1095
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill ETHUSDT 4h --days 1095
 ```
 
 ### 3b. Forex & Metals (rate limit 7/menit — biarkan jalan semalam)
 
 ```powershell
 # XAUUSD
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol XAUUSD --tf 1h --years 3
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol XAUUSD --tf 4h --years 3
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill XAUUSD 1h --days 1095
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill XAUUSD 4h --days 1095
 
 # EURUSD
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol EURUSD --tf 1h --years 3
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol EURUSD --tf 4h --years 3
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill EURUSD 1h --days 1095
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill EURUSD 4h --days 1095
 
 # GBPUSD
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol GBPUSD --tf 1h --years 3
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol GBPUSD --tf 4h --years 3
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill GBPUSD 1h --days 1095
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill GBPUSD 4h --days 1095
 
 # USDJPY
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol USDJPY --tf 1h --years 3
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill --symbol USDJPY --tf 4h --years 3
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill USDJPY 1h --days 1095
+& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.backfill USDJPY 4h --days 1095
 ```
 
-### 3c. Verifikasi Backfill
+### 3c. Backfill di VPS (via Docker)
+
+```bash
+# Di VPS (dari /opt/robil-trade):
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  exec app python -m rtrade.cli.backfill BTCUSDT 1h --days 1095
+
+# Atau gunakan script massal:
+chmod +x scripts/backfill_all.sh
+./scripts/backfill_all.sh
+```
+
+### 3d. Verifikasi Backfill
 
 ```sql
 SELECT i.symbol, c.timeframe, count(*)
@@ -112,14 +123,14 @@ Verifikasi di DB:
 SELECT DISTINCT currency FROM economic_events LIMIT 20;
 ```
 
-Harus muncul: `USD`, `EUR`, `GBP`, `JPY`. Kalau muncul kode lain (`MX`, `BR`), tambahkan di `_COUNTRY_TO_CURRENCY` jika relevan.
+Harus muncul: `USD`, `EUR`, `GBP`, `JPY`.
 
 ---
 
-## 5. Backtest Pertama (setelah backfill selesai)
+## 5. Backtest (setelah backfill selesai)
 
 ```powershell
-# In-sample S1 × BTCUSDT (crypto paling cepat)
+# In-sample S1 × BTCUSDT
 & "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python scripts/run_backtest.py --strategy s1_trend_pullback --instrument BTCUSDT
 
 # Walk-forward S1 × BTCUSDT
@@ -129,29 +140,26 @@ Harus muncul: `USD`, `EUR`, `GBP`, `JPY`. Kalau muncul kode lain (`MX`, `BR`), t
 & "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python scripts/run_backtest.py --strategy s1_trend_pullback --instrument BTCUSDT --walkforward --smart-exit
 ```
 
-Ulangi untuk semua kombinasi strategi × instrumen. Hasilnya di `reports/`.
+### Validasi di VPS
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  exec app python scripts/run_backtest.py --strategy s1_trend_pullback --instrument BTCUSDT --walkforward --smart-exit
+# hasil ada di ./reports (volume-mounted ke host)
+```
 
 ---
 
 ## 6. Scan Manual Pertama
 
 ```powershell
-# Via API (butuh server jalan)
 curl -X POST http://localhost:8000/scan -H "Authorization: Bearer YOUR_API_AUTH_TOKEN"
-
-# Atau langsung:
-& "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -c "
-import asyncio
-from rtrade.pipeline.scan import run_scan
-result = asyncio.run(run_scan())
-print(result)
-"
 ```
 
 Periksa:
 - Tabel `signals` terisi (status apa pun)
 - `signal_audits` punya row `CANDIDATE`/`GATE`
-- Log bersih (tidak ada exception)
+- Log bersih
 
 ---
 
@@ -170,16 +178,24 @@ Jalankan scan manual lagi → cek audit stage `analyst` & `confidence` di payloa
 ## 8. Worker + Bot
 
 ```powershell
-# Start scheduler (background)
+# Start scheduler
 & "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.scheduler.main
 
 # Start Telegram bot (separate terminal)
 & "C:\Users\Dian Ganteng\.local\bin\uv.exe" run python -m rtrade.cli.bot
 ```
 
-Tes Telegram:
-- `/status` → harus respon sehat
-- `/signals` → harus tampilkan sinyal terbaru (atau "no signals")
+### Di VPS (dengan Docker)
+
+```bash
+# Tanpa Telegram:
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+
+# Dengan Telegram:
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --profile telegram up -d
+```
+
+Tes Telegram: `/status`, `/signals`
 
 ---
 

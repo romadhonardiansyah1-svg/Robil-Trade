@@ -100,6 +100,14 @@ class LLMSettings(_StrictModel):
     escalation_low: float = Field(default=0.48, ge=0.0, le=1.0)
     escalation_high: float = Field(default=0.63, ge=0.0, le=1.0)
     coroner_enabled: bool = False
+    # --- OAuth auth layer (O6) ---
+    auth_mode: str = Field(default="api_key")  # api_key|oauth2|vertex|azure_ad
+    vertex_project: str = Field(default="")
+    vertex_location: str = Field(default="us-central1")
+    # --- Per-model auth routing (O11) ---
+    default_auth_profile: str = Field(default="")
+    auth_profiles: dict[str, Any] = Field(default_factory=dict)
+    model_routes: dict[str, Any] = Field(default_factory=dict)
 
 
 class WalkForwardSettings(_StrictModel):

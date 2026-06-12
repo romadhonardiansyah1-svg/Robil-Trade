@@ -57,6 +57,21 @@ from rtrade.strategies import STRATEGY_REGISTRY, StrategyConfig
 
 logger = structlog.get_logger(__name__)
 
+
+def _build_cred_provider(cfg: AppConfig) -> Any:
+    """Build credential provider from config. Returns None for api_key mode (unchanged)."""
+    if cfg.settings.llm.auth_mode == "api_key":
+        return None
+    from rtrade.llm.auth.registry import build_credential_provider
+
+    prov = build_credential_provider(cfg.settings.llm, cfg.secrets)
+    logger.info(
+        "auth_provider_selected",
+        mode=prov.mode,
+    )
+    return prov
+
+
 # W2: |0.05%|/8h — funding rate extreme threshold.
 FUNDING_EXTREME_ABS = 0.0005
 
@@ -499,6 +514,7 @@ async def track_paper_signals(
                                 LLMClient(
                                     api_key=cfg.secrets.gemini_api_key_1,
                                     timeout=cfg.settings.llm.timeout_seconds,
+                                    credential_provider=_build_cred_provider(cfg),
                                 ),
                                 model=cfg.settings.llm.analyst_model,
                                 candidate_payload=signal.payload.get("candidate") or {},
@@ -880,6 +896,7 @@ async def _run_strategies(
                 api_key=cfg.secrets.gemini_api_key_1,
                 timeout=cfg.settings.llm.timeout_seconds,
                 temperature=cfg.settings.llm.temperature,
+                credential_provider=_build_cred_provider(cfg),
             )
             pres = await run_llm_pipeline(
                 candidate,

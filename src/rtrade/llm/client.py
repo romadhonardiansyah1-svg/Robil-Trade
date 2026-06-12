@@ -16,7 +16,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from rtrade.llm.auth.base import CredentialProvider
 
 import litellm
 import structlog
@@ -55,6 +58,7 @@ class LLMClient:
     timeout: int = 45
     max_retries: int = 1
     temperature: float = 0.2
+    credential_provider: CredentialProvider | None = None
     _call_count: int = field(default=0, init=False, repr=False)
     _total_cost: float = field(default=0.0, init=False, repr=False)
     _total_tokens: int = field(default=0, init=False, repr=False)
@@ -98,7 +102,10 @@ class LLMClient:
             "timeout": self.timeout,
         }
 
-        if self.api_key:
+        if self.credential_provider is not None:
+            material = await self.credential_provider.resolve()
+            material.merge_into(kwargs)
+        elif self.api_key:
             kwargs["api_key"] = self.api_key
 
         # Request structured JSON output if schema provided.

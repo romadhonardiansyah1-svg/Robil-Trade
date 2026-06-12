@@ -118,6 +118,8 @@ class GateResult(BaseModel):
 class AnalystAssessment(BaseModel):
     """Analyst agent output (P2)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     verdict: str = Field(pattern=r"^(CONFIRM|VETO|ABSTAIN)$")
     confidence_raw: float = Field(ge=0.0, le=1.0)
     rationale_id: str = Field(min_length=50)  # Bahasa Indonesia
@@ -126,6 +128,8 @@ class AnalystAssessment(BaseModel):
 
 
 class CounterArgument(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     argument: str = Field(min_length=20)
     severity: str = Field(pattern=r"^(low|med|high)$")
     source_ids: list[str] = Field(min_length=1)
@@ -133,6 +137,8 @@ class CounterArgument(BaseModel):
 
 class CriticReview(BaseModel):
     """Critic agent output (P2)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     counter_arguments: list[CounterArgument] = Field(min_length=3)
     recommendation: str = Field(pattern=r"^(PROCEED|VETO|ABSTAIN)$")

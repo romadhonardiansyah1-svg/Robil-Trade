@@ -1,0 +1,197 @@
+"""OAuth2 credential provider — standard flows, bukan token konsumen.
+
+Grant yang didukung:
+- client_credentials: server-to-server (mis. gateway OAuth, Azure client creds).
+- device_code: login interaktif via CLI (mirip gemini-cli) — disimpan via token_store.
+- refresh_token: perpanjang access token otomatis saat hampir kedaluwarsa.
+
+Provider ini TIDAK pernah dipakai untuk endpoint chat konsumen. Token_url/scopes
+menunjuk ke layanan yang memang menyediakan akses programatik.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import secrets
+import time
+from base64 import urlsafe_b64encode
+from dataclasses import dataclass, field
+from hashlib import sha256
+from urllib.parse import parse_qs, urlparse
+
+import httpx
+import structlog
+
+from rtrade.llm.auth.base import AuthMaterial, CredentialProvider
+from rtrade.llm.auth.token_store import StoredToken, load_token, save_token
+
+logger = structlog.get_logger(__name__)
+
+_REFRESH_SKEW = 120.0  # refresh 2 menit sebelum expiry
+
+
+@dataclass
+class OAuth2Provider(CredentialProvider):
+    provider_id: str
+    token_url: str
+    client_id: str
+    client_secret: str = ""
+    scopes: list[str] = field(default_factory=list)
+    grant_type: str = "client_credentials"  # | "device_code"
+    device_auth_url: str = ""
+
+    @property
+    def mode(self) -> str:
+        return "oauth2"
+
+    async def resolve(self) -> AuthMaterial:
+        token = load_token(self.provider_id)
+        now = time.time()
+        if token is not None and token.expiry_epoch - _REFRESH_SKEW > now:
+            return AuthMaterial(
+                bearer_token=token.access_token,
+                auth_type="cli_oauth",
+                provider_id=self.provider_id,
+            )
+        if token is not None and token.refresh_token:
+            token = await self._refresh(token.refresh_token)
+        elif self.grant_type == "client_credentials":
+            token = await self._client_credentials()
+        else:
+            raise RuntimeError(
+                f"{self.provider_id}: tidak ada token valid. Jalankan `rtrade auth login`."
+            )
+        save_token(self.provider_id, token)
+        return AuthMaterial(
+            bearer_token=token.access_token,
+            auth_type="cli_oauth",
+            provider_id=self.provider_id,
+        )
+
+    async def _client_credentials(self) -> StoredToken:
+        data = {
+            "grant_type": "client_credentials",
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "scope": " ".join(self.scopes),
+        }
+        return await self._token_request(data)
+
+    async def _refresh(self, refresh_token: str) -> StoredToken:
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+        tok = await self._token_request(data)
+        # Sebagian provider tidak mengembalikan refresh_token baru → pakai lama.
+        if tok.refresh_token is None:
+            tok = StoredToken(tok.access_token, refresh_token, tok.expiry_epoch, tok.scopes)
+        return tok
+
+    async def _token_request(self, data: dict[str, str]) -> StoredToken:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(self.token_url, data=data)
+            resp.raise_for_status()
+            body = resp.json()
+        return StoredToken(
+            access_token=body["access_token"],
+            refresh_token=body.get("refresh_token"),
+            expiry_epoch=time.time() + float(body.get("expires_in", 3600)),
+            scopes=self.scopes,
+        )
+
+    async def device_login(self) -> StoredToken:
+        """Device-code flow interaktif (dipanggil CLI O4). Mencetak URL + kode."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            init = await client.post(
+                self.device_auth_url,
+                data={"client_id": self.client_id, "scope": " ".join(self.scopes)},
+            )
+            init.raise_for_status()
+            d = init.json()
+            verification = d.get("verification_url") or d.get("verification_uri")
+            logger.info("buka URL ini & masukkan kode", url=verification, code=d["user_code"])
+            interval = float(d.get("interval", 5))
+            device_code = d["device_code"]
+            while True:
+                await asyncio.sleep(interval)  # K6: async-aman, jangan blok event loop
+                poll = await client.post(
+                    self.token_url,
+                    data={
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        "device_code": device_code,
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                    },
+                )
+                body = poll.json()
+                if "access_token" in body:
+                    tok = StoredToken(
+                        body["access_token"],
+                        body.get("refresh_token"),
+                        time.time() + float(body.get("expires_in", 3600)),
+                        self.scopes,
+                    )
+                    save_token(self.provider_id, tok)
+                    return tok
+                if body.get("error") not in ("authorization_pending", "slow_down"):
+                    raise RuntimeError(f"device login gagal: {body.get('error')}")
+
+    # --- PKCE paste-URL support (O12) ---
+
+    def build_authorize_url(
+        self,
+        redirect_uri: str,
+        state: str,
+        code_challenge: str,
+        authorize_url: str = "",
+    ) -> str:
+        """Build authorization URL with PKCE for paste-URL flow."""
+        base = authorize_url or self.device_auth_url.replace("/device/code", "/authorize")
+        params = (
+            f"?client_id={self.client_id}"
+            f"&redirect_uri={redirect_uri}"
+            f"&response_type=code"
+            f"&scope={'+'.join(self.scopes)}"
+            f"&state={state}"
+            f"&code_challenge={code_challenge}"
+            f"&code_challenge_method=S256"
+        )
+        return base + params
+
+    async def exchange_pasted_redirect(
+        self,
+        redirect_response: str,
+        redirect_uri: str,
+        code_verifier: str,
+    ) -> StoredToken:
+        """Exchange authorization code from pasted redirect URL for token."""
+        parsed = urlparse(redirect_response)
+        qs = parse_qs(parsed.query)
+        if "code" not in qs:
+            raise ValueError(
+                "URL redirect tidak mengandung parameter 'code'. "
+                "Pastikan Anda menyalin URL lengkap dari address bar."
+            )
+        code = qs["code"][0]
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "code_verifier": code_verifier,
+        }
+        tok = await self._token_request(data)
+        save_token(self.provider_id, tok)
+        return tok
+
+
+def generate_pkce_pair() -> tuple[str, str]:
+    """Generate PKCE code_verifier and code_challenge (S256)."""
+    verifier = secrets.token_urlsafe(64)
+    digest = sha256(verifier.encode("ascii")).digest()
+    challenge = urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge

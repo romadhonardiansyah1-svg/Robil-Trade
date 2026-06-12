@@ -15,6 +15,9 @@ from rtrade.core.constants import Timeframe
 from rtrade.core.errors import DataValidationError
 
 _TIMEFRAME_DURATION: dict[Timeframe, timedelta] = {
+    Timeframe.M1: timedelta(minutes=1),
+    Timeframe.M5: timedelta(minutes=5),
+    Timeframe.M15: timedelta(minutes=15),
     Timeframe.H1: timedelta(hours=1),
     Timeframe.H4: timedelta(hours=4),
     Timeframe.D1: timedelta(days=1),

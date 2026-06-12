@@ -79,3 +79,33 @@ def compute_win_rate(outcomes: list[float]) -> float | None:
         return None
     wins = sum(1 for r in outcomes if r > 0)
     return wins / len(outcomes)
+
+
+def throttled_risk_pct(
+    base_risk_pct: float,
+    recent_outcomes: list[float],
+    *,
+    window: int = 10,
+    mult: float = 0.5,
+) -> float:
+    """T27: Return risk_pct, throttled down if recent expectancy is negative.
+
+    Args:
+        base_risk_pct: Normal risk percentage.
+        recent_outcomes: List of recent R-multiples (newest last).
+        window: Rolling window size.
+        mult: Multiplier when throttled (0 < mult < 1).
+
+    Returns:
+        base_risk_pct or base_risk_pct * mult (never > base).
+    """
+    if len(recent_outcomes) < window:
+        return base_risk_pct
+
+    window_outcomes = recent_outcomes[-window:]
+    expectancy = sum(window_outcomes) / len(window_outcomes)
+
+    if expectancy < 0:
+        return base_risk_pct * mult
+
+    return base_risk_pct

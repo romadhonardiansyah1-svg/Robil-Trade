@@ -75,6 +75,9 @@ class RiskSettings(_StrictModel):
     news_blackout_after_min: int = Field(ge=0)
     expectancy_guard_window: int = Field(ge=10)
     equity_usd: float = Field(default=10_000.0, gt=0.0)
+    throttle_enabled: bool = True
+    throttle_window: int = Field(default=10, ge=5)
+    throttle_mult: float = Field(default=0.5, gt=0.0, lt=1.0)
 
     @model_validator(mode="after")
     def _check_consistency(self) -> "RiskSettings":

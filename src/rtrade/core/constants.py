@@ -19,6 +19,9 @@ class Regime(StrEnum):
 
 
 class Timeframe(StrEnum):
+    M1 = "1m"
+    M5 = "5m"
+    M15 = "15m"
     H1 = "1h"
     H4 = "4h"
     D1 = "1d"
@@ -47,3 +50,4 @@ class AuditStage(StrEnum):
     VERIFIER = "verifier"
     GATE = "gate"
     DELIVERY = "delivery"
+    REGIME_SHADOW = "regime_shadow"

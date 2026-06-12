@@ -134,9 +134,10 @@ def check_outcome(
 class CandleBar:
     """Minimal closed bar for replay."""
 
-    ts: datetime
     high: float
     low: float
+    close: float = 0.0
+    ts: datetime | None = None
 
 
 def replay_signal(

@@ -16,7 +16,7 @@ def test_regime_values() -> None:
 
 
 def test_timeframe_values() -> None:
-    assert {t.value for t in Timeframe} == {"1h", "4h", "1d"}
+    assert {t.value for t in Timeframe} == {"1m", "5m", "15m", "1h", "4h", "1d"}
 
 
 def test_signal_status_values() -> None:
@@ -43,4 +43,5 @@ def test_audit_stage_values() -> None:
         "verifier",
         "gate",
         "delivery",
+        "regime_shadow",
     }

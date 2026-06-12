@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hmac
 import time
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from sqlalchemy import select
 
 from rtrade.core.config import AppConfig
@@ -19,6 +21,51 @@ from rtrade.persistence.repositories import SignalRepo
 from rtrade.pipeline import run_scan
 
 router = APIRouter()
+
+# S10: per-IP auth failure tracking (rate limiting)
+_auth_failures: dict[str, list[float]] = defaultdict(list)
+_AUTH_FAIL_WINDOW = 60.0  # seconds
+_AUTH_FAIL_LIMIT = 10  # max failures per window
+
+
+def _require_bearer(
+    authorization: str | None,
+    cfg: AppConfig,
+    *,
+    client_ip: str = "unknown",
+) -> None:
+    """Validate Bearer token with constant-time comparison (S1).
+
+    Raises HTTPException(401/403/429/503) on failure.
+    """
+    # S10: rate-limit check
+    now = time.time()
+    window = _auth_failures[client_ip]
+    window[:] = [t for t in window if now - t < _AUTH_FAIL_WINDOW]
+    if len(window) >= _AUTH_FAIL_LIMIT:
+        raise HTTPException(status_code=429, detail="too many auth failures")
+
+    if not authorization or not authorization.startswith("Bearer "):
+        window.append(now)
+        raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        window.append(now)
+        raise HTTPException(status_code=401, detail="empty bearer token")
+    if not cfg.secrets.api_auth_token:
+        raise HTTPException(status_code=503, detail="API_AUTH_TOKEN is not configured")
+    if not hmac.compare_digest(token, cfg.secrets.api_auth_token):
+        window.append(now)
+        raise HTTPException(status_code=403, detail="invalid bearer token")
+
+
+def _client_ip(request: Request) -> str:
+    """Extract client IP (X-Forwarded-For from Caddy, or direct)."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 
 _last_scan_time: float = 0.0
 
@@ -37,10 +84,13 @@ async def health() -> dict[str, object]:
 
 @router.get("/signals")
 async def list_signals(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict[str, object]:
     """List recent signals."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     try:
@@ -56,9 +106,14 @@ async def list_signals(
 
 
 @router.get("/signals/{signal_id}")
-async def get_signal(signal_id: str) -> dict[str, object]:
+async def get_signal(
+    signal_id: str,
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
     """Get signal detail including payload."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     try:
@@ -72,9 +127,13 @@ async def get_signal(signal_id: str) -> dict[str, object]:
 
 
 @router.get("/calibration")
-async def calibration() -> dict[str, object]:
+async def calibration(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
     """Calibration metrics over the last 30 days."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     since = datetime.now(UTC) - timedelta(days=30)
@@ -103,6 +162,7 @@ async def calibration() -> dict[str, object]:
 
 @router.post("/scan")
 async def trigger_scan(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
     symbol: Annotated[str, Query(min_length=3)] = "XAUUSD",
     timeframe: Annotated[Timeframe, Query()] = Timeframe.H1,
@@ -111,13 +171,7 @@ async def trigger_scan(
     global _last_scan_time
 
     cfg = AppConfig.load()
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing or invalid bearer token")
-    token = authorization.removeprefix("Bearer ").strip()
-    if not cfg.secrets.api_auth_token:
-        raise HTTPException(status_code=503, detail="API_AUTH_TOKEN is not configured")
-    if token != cfg.secrets.api_auth_token:
-        raise HTTPException(status_code=403, detail="invalid bearer token")
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
 
     now = time.time()
     if now - _last_scan_time < 60:
@@ -135,9 +189,13 @@ async def trigger_scan(
 
 
 @router.get("/metrics")
-async def prometheus_metrics() -> dict[str, object]:
+async def prometheus_metrics(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, object]:
     """Return simple signal counters."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     try:
@@ -275,9 +333,13 @@ def _aggregate_failures(payloads: list[dict[str, Any]]) -> dict[str, int]:
 
 
 @router.get("/analytics/exits")
-async def analytics_exits() -> dict[str, Any]:
+async def analytics_exits(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
     """Virtual exit policy comparison (W10)."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     try:
@@ -291,9 +353,13 @@ async def analytics_exits() -> dict[str, Any]:
 
 
 @router.get("/analytics/excursion")
-async def analytics_excursion() -> dict[str, Any]:
+async def analytics_excursion(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
     """MAE/MFE excursion analytics (W10)."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     try:
@@ -311,9 +377,13 @@ async def analytics_excursion() -> dict[str, Any]:
 
 
 @router.get("/analytics/failures")
-async def analytics_failures() -> dict[str, Any]:
+async def analytics_failures(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
     """Coroner failure mode distribution (W10)."""
     cfg = AppConfig.load()
+    _require_bearer(authorization, cfg, client_ip=_client_ip(request))
     engine = create_engine(cfg.secrets.database_url)
     factory = create_session_factory(engine)
     try:

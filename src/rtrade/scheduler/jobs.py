@@ -103,3 +103,52 @@ async def health_check_job() -> None:
         litellm_url=cfg.secrets.litellm_base_url,
     ).run_all()
     logger.info("health check completed", status=health.status.value)
+
+
+async def hmm_train_job() -> None:
+    """Weekly HMM retrain per instrument (Sunday 02:00 UTC) (W8)."""
+    import joblib
+    import pandas as pd
+
+    from rtrade.core.constants import Timeframe
+    from rtrade.indicators.engine import compute as compute_indicators
+    from rtrade.persistence.db import create_engine, create_session_factory
+    from rtrade.persistence.repositories import CandleRepo, InstrumentRepo
+    from rtrade.regime.hmm import HMMRegimeDetector
+
+    cfg = AppConfig.load()
+    engine = create_engine(cfg.secrets.database_url)
+    session_factory = create_session_factory(engine)
+    try:
+        async with session_factory() as session:
+            for inst in cfg.instruments:
+                row = await InstrumentRepo(session).get_by_symbol(inst.symbol)
+                if row is None:
+                    continue
+                candles = await CandleRepo(session).latest_n(row.id, Timeframe.H1, 5000)
+                if len(candles) < 600:
+                    continue
+                df = pd.DataFrame(
+                    [
+                        {
+                            "ts": c.ts,
+                            "open": float(c.open),
+                            "high": float(c.high),
+                            "low": float(c.low),
+                            "close": float(c.close),
+                            "volume": float(c.volume),
+                        }
+                        for c in candles
+                    ]
+                )
+                df = compute_indicators(df)
+                detector = HMMRegimeDetector()
+                detector.train(df)
+                from pathlib import Path
+
+                out = Path("models")
+                out.mkdir(exist_ok=True)
+                joblib.dump(detector, out / f"hmm_{inst.symbol}.joblib")
+                logger.info("hmm trained", symbol=inst.symbol)
+    finally:
+        await engine.dispose()

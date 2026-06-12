@@ -70,6 +70,7 @@ def _make_pack(
         },
         calendar_next_72h=[],
         derivatives=None,
+        similar_setups=None,
         recent_summary={"return_24h": 0.5, "return_7d": 1.2, "range_position": 65.0},
         source_ids=source_ids,
     )

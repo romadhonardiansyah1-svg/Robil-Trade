@@ -20,6 +20,7 @@ from rtrade.core.constants import Timeframe
 from rtrade.scheduler.jobs import (
     calendar_sync_job,
     health_check_job,
+    hmm_train_job,
     paper_track_job,
     scan_job,
 )
@@ -88,6 +89,15 @@ def create_scheduler() -> AsyncIOScheduler:
         trigger=IntervalTrigger(minutes=5),
         id="health_check",
         name="Health check",
+        replace_existing=True,
+    )
+
+    # W8: HMM retrain: weekly Sunday 02:00 UTC.
+    scheduler.add_job(
+        hmm_train_job,
+        trigger=CronTrigger(day_of_week="sun", hour="2", minute="0", timezone="UTC"),
+        id="hmm_train",
+        name="HMM weekly retrain",
         replace_existing=True,
     )
 

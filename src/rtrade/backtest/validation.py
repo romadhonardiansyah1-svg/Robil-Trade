@@ -31,6 +31,7 @@ class ValidationGateResult:
     max_drawdown_pct: float
     dsr_probability: float
     pbo: float
+    permutation_p: float | None
     all_passed: bool
     gate_results: dict[str, bool]
 
@@ -163,6 +164,7 @@ def run_validation_gates(
     min_dsr_prob: float = 0.90,
     max_pbo: float = 0.30,
     pbo_value: float | None = None,
+    permutation_p: float | None = None,
 ) -> ValidationGateResult:
     """Run all validation gates on backtest metrics (PLAN §8.11.4)."""
     gates: dict[str, bool] = {}
@@ -193,6 +195,10 @@ def run_validation_gates(
     pbo_val = pbo_value if pbo_value is not None else 0.0
     gates["pbo <= 0.30"] = pbo_val <= max_pbo
 
+    # Gate 7: Permutation p-value (W7).
+    if permutation_p is not None:
+        gates["permutation_p <= 0.05"] = permutation_p <= 0.05
+
     all_passed = all(gates.values())
 
     return ValidationGateResult(
@@ -202,6 +208,7 @@ def run_validation_gates(
         max_drawdown_pct=metrics.max_drawdown_pct,
         dsr_probability=dsr_prob,
         pbo=pbo_val,
+        permutation_p=permutation_p,
         all_passed=all_passed,
         gate_results=gates,
     )

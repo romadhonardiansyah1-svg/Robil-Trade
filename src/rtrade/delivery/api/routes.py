@@ -196,3 +196,136 @@ def _confidence_buckets(signals: list[Signal]) -> dict[str, int]:
         else:
             buckets["0.85-1.00"] += 1
     return buckets
+
+
+# ---- W10: Analytics helpers (pure, unit-testable) ----
+
+
+def _aggregate_exits(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate virtual exit results across payloads (W10)."""
+    policy_sums: dict[str, list[float]] = {}
+    for p in payloads:
+        ve = p.get("virtual_exits")
+        if not ve or not isinstance(ve, dict):
+            continue
+        for policy_name, result in ve.items():
+            if not isinstance(result, dict) or "outcome_r" not in result:
+                continue
+            policy_sums.setdefault(policy_name, []).append(float(result["outcome_r"]))
+    return {
+        policy: {
+            "avg_r": round(sum(vals) / len(vals), 4) if vals else 0.0,
+            "n": len(vals),
+        }
+        for policy, vals in policy_sums.items()
+    }
+
+
+def _aggregate_excursion(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate MAE/MFE excursion analytics per outcome (W10)."""
+    import numpy as np
+
+    winners_mae: list[float] = []
+    winners_mfe: list[float] = []
+    losers_mae: list[float] = []
+    losers_mfe: list[float] = []
+    for p in payloads:
+        exc = p.get("excursion")
+        outcome_r = p.get("outcome_r")
+        if not exc or outcome_r is None:
+            continue
+        mae = float(exc.get("mae_r", 0))
+        mfe = float(exc.get("mfe_r", 0))
+        if float(outcome_r) > 0:
+            winners_mae.append(mae)
+            winners_mfe.append(mfe)
+        else:
+            losers_mae.append(mae)
+            losers_mfe.append(mfe)
+    result: dict[str, Any] = {
+        "winners": {
+            "n": len(winners_mae),
+            "avg_mae_r": round(sum(winners_mae) / len(winners_mae), 4) if winners_mae else None,
+            "avg_mfe_r": round(sum(winners_mfe) / len(winners_mfe), 4) if winners_mfe else None,
+        },
+        "losers": {
+            "n": len(losers_mae),
+            "avg_mae_r": round(sum(losers_mae) / len(losers_mae), 4) if losers_mae else None,
+            "avg_mfe_r": round(sum(losers_mfe) / len(losers_mfe), 4) if losers_mfe else None,
+        },
+    }
+    if winners_mae:
+        result["suggested_sl_review"] = round(float(np.percentile(winners_mae, 90)), 4)
+    return result
+
+
+def _aggregate_failures(payloads: list[dict[str, Any]]) -> dict[str, int]:
+    """Aggregate coroner failure modes (W10)."""
+    modes: dict[str, int] = {}
+    for p in payloads:
+        cor = p.get("coroner")
+        if not cor or not isinstance(cor, dict):
+            continue
+        mode = cor.get("failure_mode", "unknown")
+        modes[mode] = modes.get(mode, 0) + 1
+    return modes
+
+
+# ---- W10: Analytics API routes ----
+
+
+@router.get("/analytics/exits")
+async def analytics_exits() -> dict[str, Any]:
+    """Virtual exit policy comparison (W10)."""
+    cfg = AppConfig.load()
+    engine = create_engine(cfg.secrets.database_url)
+    factory = create_session_factory(engine)
+    try:
+        async with factory() as session:
+            result = await session.execute(select(Signal).where(Signal.outcome_r.is_not(None)))
+            signals = list(result.scalars().all())
+            payloads = [s.payload or {} for s in signals]
+            return _aggregate_exits(payloads)
+    finally:
+        await engine.dispose()
+
+
+@router.get("/analytics/excursion")
+async def analytics_excursion() -> dict[str, Any]:
+    """MAE/MFE excursion analytics (W10)."""
+    cfg = AppConfig.load()
+    engine = create_engine(cfg.secrets.database_url)
+    factory = create_session_factory(engine)
+    try:
+        async with factory() as session:
+            result = await session.execute(select(Signal).where(Signal.outcome_r.is_not(None)))
+            signals = list(result.scalars().all())
+            payloads = [
+                {**(s.payload or {}), "outcome_r": float(s.outcome_r)}
+                for s in signals
+                if s.outcome_r is not None
+            ]
+            return _aggregate_excursion(payloads)
+    finally:
+        await engine.dispose()
+
+
+@router.get("/analytics/failures")
+async def analytics_failures() -> dict[str, Any]:
+    """Coroner failure mode distribution (W10)."""
+    cfg = AppConfig.load()
+    engine = create_engine(cfg.secrets.database_url)
+    factory = create_session_factory(engine)
+    try:
+        async with factory() as session:
+            result = await session.execute(
+                select(Signal).where(
+                    Signal.status == "SL_HIT",
+                    Signal.outcome_r.is_not(None),
+                )
+            )
+            signals = list(result.scalars().all())
+            payloads = [s.payload or {} for s in signals]
+            return _aggregate_failures(payloads)
+    finally:
+        await engine.dispose()

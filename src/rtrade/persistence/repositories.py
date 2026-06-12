@@ -86,6 +86,10 @@ class InstrumentRepo:
         await self._session.flush()  # populate .id
         return instrument
 
+    async def get_by_id(self, instrument_id: int) -> Instrument | None:
+        """Get instrument by primary key (W1)."""
+        return await self._session.get(Instrument, instrument_id)
+
 
 class CandleRepo:
     def __init__(self, session: AsyncSession) -> None:
@@ -291,6 +295,44 @@ class SignalRepo:
             "at": ensure_utc(at).isoformat(),
         }
         signal.payload = payload
+
+    async def merge_payload(self, signal_id: str, key: str, value: object) -> None:
+        """Read-modify-write one key into the signal's JSONB payload (W1)."""
+        signal = await self.get(signal_id)
+        if signal is None:
+            return
+        payload = dict(signal.payload)
+        payload[key] = value
+        signal.payload = payload
+
+    async def resolved_with_features(self, strategy: str, limit: int = 500) -> list[dict[str, Any]]:
+        """Resolved signals (TP/SL) with confluence features for k-NN (W6)."""
+        stmt = (
+            select(Signal)
+            .where(
+                Signal.strategy == strategy,
+                Signal.status.in_(("TP_HIT", "SL_HIT")),
+                Signal.outcome_r.is_not(None),
+            )
+            .order_by(Signal.resolved_at.desc().nullslast())
+            .limit(limit)
+        )
+        result = await self._session.execute(stmt)
+        out: list[dict[str, Any]] = []
+        for s in result.scalars().all():
+            cand = (s.payload or {}).get("candidate") or {}
+            breakdown = cand.get("confluence_breakdown") or {}
+            out.append(
+                {
+                    **{
+                        k: float(breakdown.get(k, 0))
+                        for k in ("trend", "momentum", "structure", "volume", "macro")
+                    },
+                    "hour": float(s.bar_ts.hour),
+                    "outcome_r": float(s.outcome_r or 0),
+                }
+            )
+        return out
 
 
 class AuditRepo:

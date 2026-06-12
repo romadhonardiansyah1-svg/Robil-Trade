@@ -96,6 +96,7 @@ def _make_pack() -> ContextPack:
         regime={"state": "TREND", "since": "2026-06-25", "source_id": source_ids[0]},
         calendar_next_72h=[],
         derivatives=None,
+        similar_setups=None,
         recent_summary={"return_24h": 0.5},
         source_ids=source_ids,
     )

@@ -33,7 +33,10 @@ from rtrade.llm.cascade import should_escalate
 from rtrade.llm.client import LLMClient
 from rtrade.llm.context_pack import ContextPack, build_context_pack
 from rtrade.llm.pipeline import PipelineDecision, run_llm_pipeline
-from rtrade.papertrack.tracker import check_fill, check_outcome
+from rtrade.papertrack.excursion import compute_excursion
+from rtrade.papertrack.minute_resolution import resolve_ambiguous_bar
+from rtrade.papertrack.tracker import CandleBar, replay_signal
+from rtrade.papertrack.virtual_exits import evaluate_virtual_exits
 from rtrade.persistence.db import create_engine, create_session_factory
 from rtrade.persistence.models import EconomicEvent, Signal
 from rtrade.persistence.repositories import (
@@ -53,6 +56,30 @@ from rtrade.signals.schemas import DISCLAIMER_TEXT, SignalCandidate, TradingSign
 from rtrade.strategies import STRATEGY_REGISTRY, StrategyConfig
 
 logger = structlog.get_logger(__name__)
+
+# W2: |0.05%|/8h — funding rate extreme threshold.
+FUNDING_EXTREME_ABS = 0.0005
+
+# W8: HMM regime shadow cache.
+_HMM_CACHE: dict[str, Any] = {}
+
+
+def _hmm_shadow_classify(symbol: str, df: pd.DataFrame) -> Any | None:
+    """Classify with saved HMM model; None when no model on disk (W8)."""
+    import joblib
+
+    from rtrade.regime.hmm import HMMRegimeDetector
+
+    detector = _HMM_CACHE.get(symbol)
+    if detector is None:
+        path = Path("models") / f"hmm_{symbol}.joblib"
+        if not path.exists():
+            return None
+        detector = joblib.load(path)
+        _HMM_CACHE[symbol] = detector
+    if not isinstance(detector, HMMRegimeDetector) or not detector.is_trained:
+        return None
+    return detector.classify(symbol, df)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +186,22 @@ async def run_scan(
             df_4h_ind = compute_indicators(df_4h) if not df_4h.empty else None
             regime = RegimeClassifier().classify(symbol, df_1h)
 
+            # W8: HMM regime shadow classification.
+            try:
+                hmm_state = _hmm_shadow_classify(symbol, df_1h)
+                if hmm_state is not None:
+                    await AuditRepo(session).add(
+                        stage=AuditStage.REGIME_SHADOW.value,
+                        ok=hmm_state.regime == regime.regime,
+                        detail={
+                            "rule": regime.regime.value,
+                            "hmm": hmm_state.regime.value,
+                            "prob": hmm_state.probability,
+                        },
+                    )
+            except Exception as exc:
+                logger.warning("hmm shadow failed", error=str(exc))
+
             atr = float(df_1h.iloc[-1].get("atr", 0.0))
             swings = detect_swing_points(df_1h.tail(200))
             sr_levels = cluster_sr_levels(swings, atr)
@@ -188,6 +231,31 @@ async def run_scan(
             except ProviderError as exc:
                 logger.warning("live quote unavailable, skipping price drift gate", error=str(exc))
 
+            # W2: Wire derivatives (funding rate + OI).
+            derivatives_data: dict[str, Any] | None = None
+            funding_extreme = False
+            if instrument.derivatives and isinstance(provider, CcxtProvider):
+                try:
+                    funding = await provider.fetch_funding_rate(instrument.provider_symbol)
+                    oi = await provider.fetch_open_interest(instrument.provider_symbol)
+                    rate = float(funding.funding_rate)
+                    funding_extreme = abs(rate) >= FUNDING_EXTREME_ABS
+                    derivatives_data = {
+                        "funding_rate": rate,
+                        "funding_extreme_flag": funding_extreme,
+                        "oi_change_24h": None,
+                        "open_interest": float(oi.open_interest),
+                    }
+                except ProviderError as exc:
+                    logger.warning("derivatives fetch failed", error=str(exc))
+
+            # W3: Wire live spread.
+            spread: float | None = None
+            try:
+                spread = await provider.fetch_spread(instrument.provider_symbol)
+            except Exception as exc:
+                logger.warning("spread fetch failed", error=str(exc))
+
             result = await _run_strategies(
                 cfg,
                 instrument,
@@ -205,6 +273,9 @@ async def run_scan(
                 audit_repo=AuditRepo(session),
                 now=now,
                 calendar_stale=calendar_stale,
+                funding_extreme=funding_extreme,
+                derivatives_data=derivatives_data,
+                spread=spread,
             )
             await session.commit()
 
@@ -320,46 +391,190 @@ async def track_paper_signals(
             signal_repo = SignalRepo(session)
             candle_repo = CandleRepo(session)
             for signal in await signal_repo.open_for_tracking():
-                latest = await candle_repo.latest(signal.instrument_id, Timeframe(signal.timeframe))
-                if latest is None:
+                start = ensure_utc(signal.published_at or signal.bar_ts)
+                rows = await candle_repo.get_range(
+                    signal.instrument_id,
+                    Timeframe(signal.timeframe),
+                    start,
+                    datetime.now(UTC),
+                )
+                if not rows:
                     continue
-                candle_ts = ensure_utc(latest.ts)
-                if signal.status == SignalStatus.PUBLISHED.value:
-                    update = check_fill(
-                        signal.signal_id,
-                        signal.action,
-                        float(signal.entry_limit or 0),
-                        signal.valid_until or signal.bar_ts,
-                        float(latest.high),
-                        float(latest.low),
-                        candle_ts,
+                bars = [
+                    CandleBar(
+                        ts=ensure_utc(r.ts),
+                        high=float(r.high),
+                        low=float(r.low),
+                        close=float(r.close),
                     )
-                else:
-                    update = check_outcome(
-                        signal.signal_id,
-                        signal.action,
-                        float(signal.entry_limit or 0),
-                        float(signal.stop_loss or 0),
-                        float(signal.take_profit or 0),
-                        float(latest.high),
-                        float(latest.low),
-                        candle_ts,
-                    )
-                if update is None:
+                    for r in rows
+                ]
+                entry = float(signal.entry_limit or 0)
+                sl = float(signal.stop_loss or 0)
+                tp = float(signal.take_profit or 0)
+
+                update = replay_signal(
+                    signal.signal_id,
+                    signal.action,
+                    entry,
+                    sl,
+                    tp,
+                    signal.valid_until or signal.bar_ts,
+                    already_filled=signal.status == SignalStatus.FILLED.value,
+                    candles=bars,
+                )
+                if update is None or update.new_status.value == signal.status:
                     continue
+
+                # --- T22: 1-minute resolution for ambiguous bars (crypto only) ---
+                final_status = update.new_status
+                outcome_r = update.outcome_r
+                resolution = "bar"
+                if update.new_status == SignalStatus.SL_HIT and _bar_is_ambiguous(
+                    signal.action, sl, tp, bars, update.resolved_at
+                ):
+                    resolution = "worst_case"
+                    inst_row = await InstrumentRepo(session).get_by_id(signal.instrument_id)
+                    if inst_row is not None and inst_row.market == "crypto":
+                        minute_bars = await _fetch_minute_bars(cfg, inst_row, update.resolved_at)
+                        if minute_bars:
+                            first = resolve_ambiguous_bar(signal.action, entry, sl, tp, minute_bars)
+                            resolution = "minute"
+                            if first == "TP":
+                                final_status = SignalStatus.TP_HIT
+                                sl_dist = abs(entry - sl) or 1.0
+                                outcome_r = abs(tp - entry) / sl_dist
+
                 await signal_repo.update_tracking_status(
                     update.signal_id,
-                    status=update.new_status.value,
+                    status=final_status.value,
                     resolved_at=update.resolved_at,
-                    outcome_r=Decimal(str(update.outcome_r))
-                    if update.outcome_r is not None
-                    else None,
+                    outcome_r=Decimal(str(outcome_r)) if outcome_r is not None else None,
                 )
+                await signal_repo.merge_payload(signal.signal_id, "resolution", resolution)
+
+                # --- T23 + T24 + T30: analytics when trade RESOLVED ---
+                if final_status in (SignalStatus.TP_HIT, SignalStatus.SL_HIT):
+                    fill_idx = _first_touch_index(signal.action, entry, bars)
+                    after_fill = bars[fill_idx:] if fill_idx is not None else []
+                    if after_fill:
+                        atr_val = (
+                            float(
+                                (signal.payload.get("candidate") or {})
+                                .get("levels", {})
+                                .get("atr_at_signal", 0)
+                            )
+                            or 1.0
+                        )
+                        await signal_repo.merge_payload(
+                            signal.signal_id,
+                            "virtual_exits",
+                            evaluate_virtual_exits(
+                                signal.action, entry, sl, tp, atr_val, after_fill
+                            ),
+                        )
+                        mae_r, mfe_r = compute_excursion(signal.action, entry, sl, after_fill)
+                        await signal_repo.merge_payload(
+                            signal.signal_id,
+                            "excursion",
+                            {"mae_r": mae_r, "mfe_r": mfe_r},
+                        )
+                    if (
+                        final_status == SignalStatus.SL_HIT
+                        and cfg.settings.llm.enabled
+                        and cfg.settings.llm.coroner_enabled
+                    ):
+                        try:
+                            from rtrade.llm.coroner import run_coroner
+
+                            report = await run_coroner(
+                                LLMClient(
+                                    api_key=cfg.secrets.gemini_api_key_1,
+                                    timeout=cfg.settings.llm.timeout_seconds,
+                                ),
+                                model=cfg.settings.llm.analyst_model,
+                                candidate_payload=signal.payload.get("candidate") or {},
+                                price_path=[
+                                    {
+                                        "ts": str(b.ts),
+                                        "high": b.high,
+                                        "low": b.low,
+                                        "close": b.close,
+                                    }
+                                    for b in after_fill[:12]
+                                ],
+                            )
+                            await signal_repo.merge_payload(
+                                signal.signal_id,
+                                "coroner",
+                                report.model_dump(),
+                            )
+                        except Exception as exc:
+                            logger.warning("coroner failed", error=str(exc))
                 updates += 1
             await session.commit()
             return updates
     finally:
         await engine.dispose()
+
+
+def _bar_is_ambiguous(
+    action: str,
+    stop_loss: float,
+    take_profit: float,
+    bars: list[CandleBar],
+    resolved_at: datetime,
+) -> bool:
+    """True if the resolution bar hits SL AND TP in the same bar (W1)."""
+    for bar in bars:
+        if bar.ts != resolved_at:
+            continue
+        if action == "BUY":
+            return bar.low <= stop_loss and bar.high >= take_profit
+        return bar.high >= stop_loss and bar.low <= take_profit
+    return False
+
+
+def _first_touch_index(action: str, entry: float, bars: list[CandleBar]) -> int | None:
+    """Index of the first bar where entry is touched (W1)."""
+    for i, bar in enumerate(bars):
+        if bar.low <= entry <= bar.high:
+            return i
+    return None
+
+
+async def _fetch_minute_bars(
+    cfg: AppConfig, inst_row: Any, bar_open_ts: datetime
+) -> list[CandleBar]:
+    """Fetch 1m candles for one ambiguous 1H bar (crypto only, best-effort) (W1)."""
+    instrument = cfg.instrument(inst_row.symbol)
+    redis_client = aioredis.from_url(cfg.secrets.redis_url)
+    limiter = RateLimiter(redis_client)
+    provider = _make_market_provider(instrument, cfg, limiter)
+    try:
+        candles = await provider.fetch_ohlcv(
+            instrument.provider_symbol,
+            Timeframe.M1,
+            since=ensure_utc(bar_open_ts),
+            limit=70,
+        )
+        end = ensure_utc(bar_open_ts) + timeframe_duration(Timeframe.H1)
+        return [
+            CandleBar(
+                ts=ensure_utc(c.ts),
+                high=float(c.high),
+                low=float(c.low),
+                close=float(c.close),
+            )
+            for c in candles
+            if ensure_utc(c.ts) < end
+        ]
+    except Exception as exc:
+        logger.warning("minute fetch failed — keeping worst-case", error=str(exc))
+        return []
+    finally:
+        await provider.close()
+        await redis_client.aclose()
 
 
 def _build_pack(
@@ -371,6 +586,8 @@ def _build_pack(
     regime: Any,
     event_dicts: list[dict[str, object]],
     session_active: bool,
+    derivatives_data: dict[str, Any] | None = None,
+    similar_setups: dict[str, Any] | None = None,
 ) -> ContextPack:
     """Build a context pack for the LLM pipeline (F1)."""
     snap = indicator_snapshot(df_1h)
@@ -420,7 +637,8 @@ def _build_pack(
             }
             for ev in event_dicts
         ],
-        derivatives=None,
+        derivatives=derivatives_data,
+        similar_setups=similar_setups,
         df_1h=df_1h,
     )
 
@@ -452,6 +670,9 @@ async def _run_strategies(
     audit_repo: AuditRepo,
     now: datetime,
     calendar_stale: bool = False,
+    funding_extreme: bool = False,
+    derivatives_data: dict[str, Any] | None = None,
+    spread: float | None = None,
 ) -> ScanResult:
     for strategy_name, strategy_cls in STRATEGY_REGISTRY.items():
         strategy = strategy_cls()
@@ -475,6 +696,24 @@ async def _run_strategies(
             logger.info("news hard-block, skipping strategy", strategy=strategy_name)
             continue
 
+        # W4: Move paper_outcomes query before generate_candidate for throttle.
+        paper_outcomes = await session_repo.recent_outcomes(
+            strategy_name,
+            cfg.settings.risk.expectancy_guard_window,
+        )
+
+        # W4: Wire risk throttle.
+        risk_pct = cfg.settings.risk.risk_per_trade_pct
+        if cfg.settings.risk.throttle_enabled:
+            from rtrade.risk.limits import throttled_risk_pct
+
+            risk_pct = throttled_risk_pct(
+                risk_pct,
+                paper_outcomes,
+                window=cfg.settings.risk.throttle_window,
+                mult=cfg.settings.risk.throttle_mult,
+            )
+
         candidate = generate_candidate(
             strategy,
             strategy_cfg,
@@ -487,8 +726,8 @@ async def _run_strategies(
                 event_dicts, instrument.related_currencies, now, hours=12
             ),
             session_active=_session_active(instrument, now),
-            funding_extreme=False,
-            risk_pct=cfg.settings.risk.risk_per_trade_pct,
+            funding_extreme=funding_extreme,
+            risk_pct=risk_pct,
             equity=cfg.settings.risk.equity_usd,
             rr_min=cfg.settings.risk.rr_min,
             confluence_min_score=cfg.settings.signal.confluence_min_score,
@@ -496,6 +735,7 @@ async def _run_strategies(
             timeframe=Timeframe.H1,
             edge_quality_enabled=cfg.settings.signal.edge_quality.enabled,
             edge_quality_config=edge_cfg,
+            spread=spread,
         )
         if candidate is None:
             continue
@@ -509,6 +749,7 @@ async def _run_strategies(
                 "symbol": instrument.symbol,
                 "strategy": candidate.strategy,
                 "confluence": candidate.confluence_score,
+                "spread": spread,
             },
         )
 
@@ -531,10 +772,6 @@ async def _run_strategies(
             instrument_id=instrument_id,
             start=day_start,
             end=day_start + timedelta(days=1),
-        )
-        paper_outcomes = await session_repo.recent_outcomes(
-            candidate.strategy,
-            cfg.settings.risk.expectancy_guard_window,
         )
         gate = run_gate(
             candidate,
@@ -601,6 +838,24 @@ async def _run_strategies(
 
         # --- LLM pipeline: Analyst → Critic → Verifier (F1) ---
         if cfg.settings.llm.enabled:
+            # W6: Case-based memory — similar historical setups.
+            from rtrade.ml.similar import find_similar_setups
+
+            history = await session_repo.resolved_with_features(candidate.strategy)
+            bd = candidate.confluence_breakdown
+            similar = find_similar_setups(
+                {
+                    "trend": float(bd.trend),
+                    "momentum": float(bd.momentum),
+                    "structure": float(bd.structure),
+                    "volume": float(bd.volume),
+                    "macro": float(bd.macro),
+                    "hour": float(candidate.bar_ts.hour),
+                },
+                history,
+            )
+            similar_setups = similar if similar.get("n") else None
+
             pack = _build_pack(
                 instrument,
                 candidate,
@@ -610,6 +865,8 @@ async def _run_strategies(
                 regime,
                 event_dicts,
                 _session_active(instrument, now),
+                derivatives_data=derivatives_data,
+                similar_setups=similar_setups,
             )
             client = LLMClient(
                 api_key=cfg.secrets.gemini_api_key_1,
@@ -704,6 +961,23 @@ async def _run_strategies(
             "risk_mult": risk_multiplier(grade_res.grade),
             "scaled_size": round(candidate.position_size * risk_multiplier(grade_res.grade), 4),
         }
+
+        # W5: Bayesian Kelly fraction.
+        resolved = [r for r in paper_outcomes if r is not None]
+        if len(resolved) >= 30:
+            wins = [r for r in resolved if r > 0]
+            losses = [r for r in resolved if r <= 0]
+            if wins and losses:
+                from rtrade.risk.kelly import bayesian_kelly_fraction
+
+                kelly_f = bayesian_kelly_fraction(
+                    len(wins),
+                    len(losses),
+                    sum(wins) / len(wins),
+                    abs(sum(losses) / len(losses)),
+                )
+                payload["kelly"] = {"bayes_fraction": kelly_f, "n": len(resolved)}
+
         await session_repo.add(
             _signal_model(
                 candidate,

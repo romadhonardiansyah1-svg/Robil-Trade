@@ -36,6 +36,7 @@ class ContextPack:
     regime: dict[str, Any]
     calendar_next_72h: list[dict[str, Any]]
     derivatives: dict[str, Any] | None
+    similar_setups: dict[str, Any] | None
     recent_summary: dict[str, Any]
     source_ids: list[str]
 
@@ -51,6 +52,7 @@ class ContextPack:
             "regime": self.regime,
             "calendar_next_72h": self.calendar_next_72h,
             "derivatives": self.derivatives,
+            "similar_setups": self.similar_setups,
             "recent_summary": self.recent_summary,
             "source_ids": self.source_ids,
         }
@@ -96,6 +98,7 @@ def build_context_pack(
     regime_since: str,
     calendar_events: list[dict[str, Any]],
     derivatives: dict[str, Any] | None = None,
+    similar_setups: dict[str, Any] | None = None,
     df_1h: pd.DataFrame | None = None,
 ) -> ContextPack:
     """Build a context pack from pipeline data.
@@ -244,6 +247,13 @@ def build_context_pack(
         if high_20 != low_20:
             recent["range_position"] = round((close_now - low_20) / (high_20 - low_20) * 100, 1)
 
+    # --- Similar setups (W6) ---
+    similar_data: dict[str, Any] | None = None
+    if similar_setups is not None:
+        sid_sim = _make_source_id("mem", "similar", symbol, tf_str, bar_ts)
+        source_ids.append(sid_sim)
+        similar_data = {**similar_setups, "source_id": sid_sim}
+
     # --- Pack ID ---
     pack_id = hashlib.sha256(f"{symbol}:{tf_str}:{bar_ts}:{now.isoformat()}".encode()).hexdigest()[
         :16
@@ -259,6 +269,7 @@ def build_context_pack(
         regime=regime,
         calendar_next_72h=calendar_entries,
         derivatives=deriv_data,
+        similar_setups=similar_data,
         recent_summary=recent,
         source_ids=source_ids,
     )
@@ -308,6 +319,7 @@ def truncate_to_budget(pack: ContextPack, *, max_tokens: int) -> ContextPack:
         regime=pack.regime,
         calendar_next_72h=calendar,
         derivatives=pack.derivatives,
+        similar_setups=pack.similar_setups,
         recent_summary=pack.recent_summary,
         source_ids=source_ids,
     )

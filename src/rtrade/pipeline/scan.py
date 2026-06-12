@@ -16,7 +16,7 @@ import yaml
 from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Market, SignalStatus, Timeframe
 from rtrade.core.errors import ConfigError, ProviderError
-from rtrade.core.timeutil import ensure_utc
+from rtrade.core.timeutil import ensure_utc, timeframe_duration
 from rtrade.data.base import MarketDataProvider
 from rtrade.data.ccxt_provider import CcxtProvider
 from rtrade.data.finnhub_calendar import FinnhubCalendarProvider
@@ -55,6 +55,27 @@ class ScanResult:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
+async def _ingest_incremental(
+    provider: MarketDataProvider,
+    instrument: InstrumentConfig,
+    instrument_id: int,
+    tf: Timeframe,
+    repo: CandleRepo,
+    now: datetime,
+) -> int:
+    """Fetch only what's missing: watermark − 2 bars overlap, tiny limit."""
+    latest = await repo.latest(instrument_id, tf)
+    if latest is None:
+        since = now - timedelta(days=120)
+        limit = 500
+    else:
+        since = ensure_utc(latest.ts) - 2 * timeframe_duration(tf)
+        limit = 10
+    return await ingest_candles(
+        provider, instrument, instrument_id, tf, repo, since=since, limit=limit
+    )
+
+
 async def run_scan(
     symbol: str,
     timeframe: str | Timeframe = Timeframe.H1,
@@ -86,10 +107,10 @@ async def run_scan(
                 config=instrument.model_dump(mode="json"),
             )
 
-            since = datetime.now(UTC) - timedelta(days=120)
-            await ingest_candles(
-                provider, instrument, inst_row.id, tf, CandleRepo(session), since=since
-            )
+            now = datetime.now(UTC)
+            candle_repo = CandleRepo(session)
+
+            await _ingest_incremental(provider, instrument, inst_row.id, tf, candle_repo, now)
 
             if tf != Timeframe.H1:
                 await session.commit()
@@ -100,17 +121,15 @@ async def run_scan(
                     detail={"timeframe": tf.value},
                 )
 
-            if Timeframe.H4 in instrument.timeframes:
-                await ingest_candles(
-                    provider,
-                    instrument,
-                    inst_row.id,
-                    Timeframe.H4,
-                    CandleRepo(session),
-                    since=since,
+            if tf == Timeframe.H1 and Timeframe.H4 in instrument.timeframes:
+                latest_4h = await candle_repo.latest(inst_row.id, Timeframe.H4)
+                due_4h = latest_4h is None or (
+                    ensure_utc(latest_4h.ts) + 2 * timeframe_duration(Timeframe.H4) <= now
                 )
-
-            candle_repo = CandleRepo(session)
+                if due_4h:
+                    await _ingest_incremental(
+                        provider, instrument, inst_row.id, Timeframe.H4, candle_repo, now
+                    )
             df_1h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H1, 500))
             df_4h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H4, 500))
 
@@ -132,7 +151,6 @@ async def run_scan(
             sr_levels = cluster_sr_levels(swings, atr)
             gap_zones = detect_gaps(df_1h.tail(200), atr)
 
-            now = datetime.now(UTC)
             events = await EventRepo(session).get_window(
                 now - timedelta(hours=2), now + timedelta(hours=72)
             )
@@ -143,6 +161,11 @@ async def run_scan(
                 now,
                 before_min=cfg.settings.risk.news_blackout_before_min,
                 after_min=cfg.settings.risk.news_blackout_after_min,
+            )
+
+            calendar_ts = await EventRepo(session).latest_fetch_ts()
+            calendar_stale = instrument.market != Market.CRYPTO and (
+                calendar_ts is None or (now - ensure_utc(calendar_ts)) > timedelta(hours=18)
             )
 
             live_price: float | None = None
@@ -166,6 +189,7 @@ async def run_scan(
                 live_price,
                 session_repo=SignalRepo(session),
                 now=now,
+                calendar_stale=calendar_stale,
             )
             await session.commit()
 
@@ -180,6 +204,13 @@ async def run_scan(
             )
             try:
                 await telegram.send_signal(result.message)
+                logger.info("telegram delivery ok", signal_id=result.signal_id)
+            except Exception as exc:
+                logger.error(
+                    "telegram delivery failed — signal still PUBLISHED",
+                    signal_id=result.signal_id,
+                    error=str(exc),
+                )
             finally:
                 await telegram.close()
 
@@ -308,6 +339,7 @@ async def _run_strategies(
     *,
     session_repo: SignalRepo,
     now: datetime,
+    calendar_stale: bool = False,
 ) -> ScanResult:
     for strategy_name, strategy_cls in STRATEGY_REGISTRY.items():
         strategy = strategy_cls()
@@ -330,10 +362,11 @@ async def _run_strategies(
             session_active=_session_active(instrument, now),
             funding_extreme=False,
             risk_pct=cfg.settings.risk.risk_per_trade_pct,
-            equity=10_000.0,
+            equity=cfg.settings.risk.equity_usd,
             rr_min=cfg.settings.risk.rr_min,
             confluence_min_score=cfg.settings.signal.confluence_min_score,
             valid_bars=valid_bars,
+            timeframe=Timeframe.H1,
             edge_quality_enabled=cfg.settings.signal.edge_quality.enabled,
             edge_quality_config=edge_cfg,
         )
@@ -376,6 +409,7 @@ async def _run_strategies(
             related_currencies=instrument.related_currencies,
             news_blackout_before_min=cfg.settings.risk.news_blackout_before_min,
             news_blackout_after_min=cfg.settings.risk.news_blackout_after_min,
+            calendar_stale=calendar_stale,
             regime=regime.regime,
             required_regime=strategy.required_regime,
             signals_today=signals_today,
@@ -406,14 +440,49 @@ async def _run_strategies(
             )
 
         confidence = Decimal(str(round(candidate.confluence_score / 100, 4)))
+        rationale = "Sinyal deterministik: semua guardrail utama lolos."
+        key_risks = ["Eksekusi tetap manual; validasi ulang spread dan berita sebelum entry."]
+        sources: list[str] = ["deterministic_pipeline"]
+        llm_used = False
+
+        # --- T16: LLM pipeline (when enabled) ---
+        if cfg.settings.llm.enabled:
+            try:
+                from rtrade.llm.client import LLMClient
+
+                llm_client = LLMClient(
+                    api_key=cfg.secrets.gemini_api_key_1,
+                    timeout=cfg.settings.llm.timeout_seconds,
+                )
+                analyst_result = await llm_client.complete(
+                    model=cfg.settings.llm.analyst_model,
+                    system_prompt="You are a professional trading analyst.",
+                    user_prompt=format_candidate_deterministic(
+                        candidate, pip_size=instrument.pip_size
+                    ),
+                )
+                rationale = analyst_result.content
+                sources = ["llm_analyst", "deterministic_pipeline"]
+                llm_used = True
+                logger.info(
+                    "llm analyst completed",
+                    signal_id=candidate.candidate_id,
+                    tokens=analyst_result.total_tokens,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "llm pipeline failed — falling back to deterministic",
+                    error=str(exc),
+                )
+
         signal = TradingSignal(
             signal_id=candidate.candidate_id,
             candidate=candidate,
             confidence=float(confidence),
-            rationale="Sinyal deterministik: semua guardrail utama lolos.",
-            key_risks=["Eksekusi tetap manual; validasi ulang spread dan berita sebelum entry."],
-            sources=["deterministic_pipeline"],
-            llm_used=False,
+            rationale=rationale,
+            key_risks=key_risks,
+            sources=sources,
+            llm_used=llm_used,
             disclaimer=DISCLAIMER_TEXT,
             published_at=now,
         )
@@ -432,7 +501,9 @@ async def _run_strategies(
             timeframe=candidate.timeframe.value,
             status="published",
             signal_id=candidate.candidate_id,
-            message=format_candidate_deterministic(candidate, pip_size=instrument.pip_size),
+            message=format_candidate_deterministic(
+                candidate, pip_size=instrument.pip_size, equity=cfg.settings.risk.equity_usd
+            ),
             detail={"confluence": candidate.confluence_score, "regime": regime.regime.value},
         )
 

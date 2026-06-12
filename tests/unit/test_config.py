@@ -145,3 +145,19 @@ class TestToSEnforcement:
     def test_empty_keys_allowed_in_p0(self) -> None:
         secrets = Secrets(_env_file=None)
         assert secrets.env == "dev"
+
+
+class TestEquityConfig:
+    def test_equity_default_and_override(self, config_dir: Path) -> None:
+        cfg = AppConfig.load(config_dir=config_dir, env_file=None)
+        # settings.yaml now has equity_usd: 10000
+        assert cfg.settings.risk.equity_usd == 10000
+
+    def test_equity_default_fallback(self) -> None:
+        # Without equity_usd, the default should be 10000
+        risk = RiskSettings.model_validate({**VALID_RISK})
+        assert risk.equity_usd == 10_000.0
+
+    def test_equity_custom_value(self) -> None:
+        risk = RiskSettings.model_validate({**VALID_RISK, "equity_usd": 25000})
+        assert risk.equity_usd == 25000

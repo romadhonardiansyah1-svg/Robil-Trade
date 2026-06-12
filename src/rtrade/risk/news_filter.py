@@ -104,3 +104,42 @@ def check_news_blackout(
             return True, reason
 
     return False, None
+
+
+def _parse_event_time(raw: object) -> datetime | None:
+    """Parse event_time from various formats."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        event_time = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+        return ensure_utc(event_time)
+    if isinstance(raw, datetime):
+        return ensure_utc(raw)
+    return None
+
+
+def high_impact_within(
+    events: list[dict[str, object]],
+    related_currencies: list[str],
+    now: datetime,
+    *,
+    hours: int,
+) -> bool:
+    """True if there is a high-impact event for related currencies within `hours` ahead."""
+    now = ensure_utc(now)
+    window_end = now + timedelta(hours=hours)
+    related_upper = {c.upper() for c in related_currencies}
+    for event in events:
+        currency = str(event.get("currency", "")).upper()
+        if currency not in related_upper:
+            continue
+        impact = str(event.get("impact", "low")).lower()
+        if impact != "high" and not _is_always_high(str(event.get("event", ""))):
+            continue
+        event_time = _parse_event_time(event.get("event_time"))
+        if event_time is None:
+            continue
+        if now <= event_time <= window_end:
+            return True
+    return False

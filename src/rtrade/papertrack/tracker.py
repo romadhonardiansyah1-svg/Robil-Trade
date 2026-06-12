@@ -128,3 +128,93 @@ def check_outcome(
         )
 
     return None
+
+
+@dataclass(frozen=True)
+class CandleBar:
+    """Minimal closed bar for replay."""
+
+    ts: datetime
+    high: float
+    low: float
+
+
+def replay_signal(
+    signal_id: str,
+    action: str,
+    entry_limit: float,
+    stop_loss: float,
+    take_profit: float,
+    valid_until: datetime,
+    already_filled: bool,
+    candles: list[CandleBar],
+) -> PaperTradeUpdate | None:
+    """Replay closed candles in order; return the FIRST terminal update.
+
+    Rules (worst-case, consistent with backtester):
+    - Not filled: if candle.ts > valid_until → EXPIRED.
+      If low ≤ entry ≤ high → FILLED on that candle; on SAME candle,
+      if SL also touched → immediate SL_HIT (worst case). TP on fill bar IGNORED.
+    - Already filled: SL & TP checked per candle; both hit → SL first.
+    """
+    filled = already_filled
+    fill_update: PaperTradeUpdate | None = None
+    sl_dist = abs(entry_limit - stop_loss) or 1.0
+
+    for bar in candles:
+        ts = ensure_utc(bar.ts)
+        if not filled:
+            if ts > ensure_utc(valid_until):
+                return PaperTradeUpdate(
+                    signal_id=signal_id,
+                    new_status=SignalStatus.EXPIRED,
+                    resolved_at=ts,
+                )
+            if bar.low <= entry_limit <= bar.high:
+                filled = True
+                fill_update = PaperTradeUpdate(
+                    signal_id=signal_id,
+                    new_status=SignalStatus.FILLED,
+                    resolved_at=ts,
+                    fill_price=entry_limit,
+                )
+                # Worst-case on fill bar: SL also touched → immediate SL.
+                if _sl_hit(action, stop_loss, bar.high, bar.low):
+                    return PaperTradeUpdate(
+                        signal_id=signal_id,
+                        new_status=SignalStatus.SL_HIT,
+                        resolved_at=ts,
+                        outcome_r=-1.0,
+                    )
+            continue
+
+        sl_hit = _sl_hit(action, stop_loss, bar.high, bar.low)
+        tp_hit = _tp_hit(action, take_profit, bar.high, bar.low)
+        if sl_hit:
+            return PaperTradeUpdate(
+                signal_id=signal_id,
+                new_status=SignalStatus.SL_HIT,
+                resolved_at=ts,
+                outcome_r=-1.0,
+            )
+        if tp_hit:
+            return PaperTradeUpdate(
+                signal_id=signal_id,
+                new_status=SignalStatus.TP_HIT,
+                resolved_at=ts,
+                outcome_r=abs(take_profit - entry_limit) / sl_dist,
+            )
+
+    return fill_update
+
+
+def _sl_hit(action: str, stop_loss: float, high: float, low: float) -> bool:
+    if action == "BUY":
+        return low <= stop_loss
+    return high >= stop_loss
+
+
+def _tp_hit(action: str, take_profit: float, high: float, low: float) -> bool:
+    if action == "BUY":
+        return high >= take_profit
+    return low <= take_profit

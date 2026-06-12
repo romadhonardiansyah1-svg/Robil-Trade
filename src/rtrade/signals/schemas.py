@@ -68,7 +68,7 @@ class SignalCandidate(BaseModel):
     risk_pct: float = Field(gt=0, le=2.0)  # GR-05
     position_size: float = Field(gt=0)
     valid_until: datetime
-    bar_ts: datetime  # close time of the triggering bar (UTC)
+    bar_ts: datetime  # open time of the triggering bar (UTC)
     created_at: datetime
 
     @model_validator(mode="after")

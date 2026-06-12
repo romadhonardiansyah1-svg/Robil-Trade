@@ -27,6 +27,8 @@ class CostModel:
     slippage_pips_per_side: float = 0.0
     # Crypto-specific.
     taker_fee_pct_per_side: float = 0.0
+    # Instrument pip size.
+    pip_size: float = 0.0001
 
     @property
     def total_pct_rt(self) -> float:
@@ -45,9 +47,9 @@ def compute_trade_cost(model: CostModel, entry_price: float, direction: str) -> 
     # Percentage-based.
     pct_cost = entry_price * (model.total_pct_rt / 100)
 
-    # Pip-based (forex — approximate conversion).
-    pip_cost = model.spread_pips_rt * 0.0001  # assuming 4-decimal pair
-    pip_cost += model.slippage_pips_per_side * 2 * 0.0001
+    # Pip-based (forex — use instrument pip_size).
+    pip_cost = model.spread_pips_rt * model.pip_size
+    pip_cost += model.slippage_pips_per_side * 2 * model.pip_size
 
     return pct_cost + pip_cost
 
@@ -74,6 +76,7 @@ def load_cost_models(config_path: Path | str = Path("config/costs.yaml")) -> dic
             commission_usd_per_lot_rt=float(params.get("commission_usd_per_lot_round_turn", 0)),
             slippage_pips_per_side=float(params.get("slippage_pips_per_side", 0)),
             taker_fee_pct_per_side=float(params.get("taker_fee_pct_per_side", 0)),
+            pip_size=float(params.get("pip_size", 0.0001)),
         )
 
     return models

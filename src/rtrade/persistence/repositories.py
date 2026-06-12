@@ -24,6 +24,7 @@ from rtrade.persistence.models import (
     Instrument,
     Signal,
     SignalAudit,
+    StrategyState,
 )
 
 
@@ -182,6 +183,11 @@ class EventRepo:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def latest_fetch_ts(self) -> datetime | None:
+        """Newest fetched_at across all events (None if table empty)."""
+        result = await self._session.execute(select(func.max(EconomicEvent.fetched_at)))
+        return result.scalar_one_or_none()
+
 
 class SignalRepo:
     def __init__(self, session: AsyncSession) -> None:
@@ -221,6 +227,7 @@ class SignalRepo:
         instrument_id: int,
         start: datetime,
         end: datetime,
+        statuses: tuple[str, ...] = ("PUBLISHED",),
     ) -> int:
         stmt = (
             select(func.count())
@@ -229,6 +236,7 @@ class SignalRepo:
                 Signal.instrument_id == instrument_id,
                 Signal.bar_ts >= ensure_utc(start),
                 Signal.bar_ts < ensure_utc(end),
+                Signal.status.in_(statuses),
             )
         )
         result = await self._session.execute(stmt)
@@ -270,6 +278,20 @@ class SignalRepo:
         stmt = update(Signal).where(Signal.signal_id == signal_id).values(**values)
         await self._session.execute(stmt)
 
+    async def mark_delivery(
+        self, signal_id: str, *, sent: bool, error: str | None, at: datetime
+    ) -> None:
+        signal = await self.get(signal_id)
+        if signal is None:
+            return
+        payload = dict(signal.payload)
+        payload["delivery"] = {
+            "sent": sent,
+            "error": error,
+            "at": ensure_utc(at).isoformat(),
+        }
+        signal.payload = payload
+
 
 class AuditRepo:
     def __init__(self, session: AsyncSession) -> None:
@@ -284,3 +306,30 @@ class AuditRepo:
         signal_id: str | None = None,
     ) -> None:
         self._session.add(SignalAudit(signal_id=signal_id, stage=stage, ok=ok, detail=detail))
+
+
+class StrategyStateRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def is_enabled(self, strategy: str) -> bool:
+        row = await self._session.get(StrategyState, strategy)
+        return True if row is None else bool(row.enabled)
+
+    async def set_state(self, strategy: str, *, enabled: bool, reason: str | None = None) -> None:
+        from rtrade.core.timeutil import utcnow
+
+        row = await self._session.get(StrategyState, strategy)
+        if row is None:
+            self._session.add(
+                StrategyState(
+                    strategy=strategy,
+                    enabled=enabled,
+                    disabled_reason=reason,
+                    updated_at=utcnow(),
+                )
+            )
+        else:
+            row.enabled = enabled
+            row.disabled_reason = reason
+            row.updated_at = utcnow()

@@ -15,6 +15,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[impo
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
 
+from rtrade.core.config import AppConfig, InstrumentConfig
+from rtrade.core.constants import Timeframe
 from rtrade.scheduler.jobs import (
     calendar_sync_job,
     health_check_job,
@@ -24,26 +26,34 @@ from rtrade.scheduler.jobs import (
 
 logger = structlog.get_logger(__name__)
 
-# Instrument x TF scan schedule: candle_close + 30s.
-# 1H: minute=0, second=30 every hour.
-# 4H: minute=0, second=30 at 00/04/08/12/16/20 UTC.
-_SCAN_SCHEDULES = [
-    # (symbol, timeframe, cron_kwargs)
-    ("XAUUSD", "1h", {"minute": "0", "second": "30"}),
-    ("XAUUSD", "4h", {"minute": "0", "second": "30", "hour": "0,4,8,12,16,20"}),
-    ("EURUSD", "1h", {"minute": "0", "second": "30"}),
-    ("EURUSD", "4h", {"minute": "0", "second": "30", "hour": "0,4,8,12,16,20"}),
-    ("BTCUSDT", "1h", {"minute": "0", "second": "30"}),
-    ("BTCUSDT", "4h", {"minute": "0", "second": "30", "hour": "0,4,8,12,16,20"}),
-]
+
+def build_scan_schedules(
+    instruments: list[InstrumentConfig],
+) -> list[tuple[str, str, dict[str, str]]]:
+    """One (symbol, tf, cron_kwargs) per instrument×TF; stagger seconds to avoid bursts."""
+    schedules: list[tuple[str, str, dict[str, str]]] = []
+    for idx, inst in enumerate(instruments):
+        second = str(30 + (idx * 5) % 30)  # 30,35,40,... avoiding burst
+        for tf in inst.timeframes:
+            if tf == Timeframe.H1:
+                cron = {"minute": "0", "second": second}
+            elif tf == Timeframe.H4:
+                cron = {"minute": "0", "second": second, "hour": "0,4,8,12,16,20"}
+            else:  # D1
+                cron = {"minute": "1", "second": second, "hour": "0"}
+            schedules.append((inst.symbol, tf.value, cron))
+    return schedules
 
 
 def create_scheduler() -> AsyncIOScheduler:
     """Create and configure the scheduler."""
     scheduler = AsyncIOScheduler(timezone="UTC")
 
+    instruments = AppConfig.load().instruments
+    scan_schedules = build_scan_schedules(instruments)
+
     # Scan jobs (instrument x timeframe).
-    for symbol, tf, cron_kw in _SCAN_SCHEDULES:
+    for symbol, tf, cron_kw in scan_schedules:
         scheduler.add_job(
             scan_job,
             trigger=CronTrigger(**cron_kw, timezone="UTC"),

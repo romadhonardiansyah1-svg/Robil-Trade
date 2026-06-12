@@ -145,3 +145,12 @@ class TestBacktestMetrics:
         metrics = compute_metrics([1.0, -2.0, 1.5], equity)
         # Max DD from 11000 to 9000 = 18.18%
         assert metrics.max_drawdown_pct > 15
+
+
+class TestPipCosts:
+    def test_pip_cost_respects_pip_size(self) -> None:
+        from rtrade.backtest.costs import compute_trade_cost
+
+        model = CostModel(symbol="USDJPY", pip_size=0.01, spread_pips_rt=2.0)
+        cost = compute_trade_cost(model, 150.0, "BUY")
+        assert cost == pytest.approx(2.0 * 0.01)

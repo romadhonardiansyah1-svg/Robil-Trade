@@ -262,3 +262,52 @@ def build_context_pack(
         recent_summary=recent,
         source_ids=source_ids,
     )
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars per token)."""
+    return len(text) // 4 + 1
+
+
+def truncate_to_budget(pack: ContextPack, *, max_tokens: int) -> ContextPack:
+    """Trim calendar events and structure items to fit within token budget."""
+    import json
+
+    text = json.dumps(pack.to_dict(), default=str)
+    est = estimate_tokens(text)
+
+    if est <= max_tokens:
+        return pack
+
+    # Iteratively trim: first calendar, then structure.
+    calendar = list(pack.calendar_next_72h)
+    structure = dict(pack.structure)
+    source_ids = list(pack.source_ids)
+
+    est = estimate_tokens(json.dumps(pack.to_dict(), default=str))
+    while est > max_tokens and len(calendar) > 3:
+        calendar.pop()
+        est = estimate_tokens(json.dumps(pack.to_dict(), default=str))
+
+    while estimate_tokens(json.dumps(pack.to_dict(), default=str)) > max_tokens:
+        for key in ("swing_highs", "swing_lows", "sr_levels", "gap_zones"):
+            items = structure.get(key, [])
+            if len(items) > 2:
+                items.pop()
+                break
+        else:
+            break
+
+    return ContextPack(
+        pack_id=pack.pack_id,
+        generated_at=pack.generated_at,
+        instrument=pack.instrument,
+        candidate=pack.candidate,
+        indicators=pack.indicators,
+        structure=structure,
+        regime=pack.regime,
+        calendar_next_72h=calendar,
+        derivatives=pack.derivatives,
+        recent_summary=pack.recent_summary,
+        source_ids=source_ids,
+    )

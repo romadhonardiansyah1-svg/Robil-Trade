@@ -218,17 +218,18 @@ def _validate_json(content: str, schema: type[BaseModel]) -> BaseModel:
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Rough cost estimate. Gemini Flash-Lite is very cheap."""
+    """Cost estimate from token counts (USD)."""
     try:
-        cost = litellm.completion_cost(
+        from litellm import cost_per_token
+
+        input_cost, output_cost = cost_per_token(
             model=model,
-            prompt=str(prompt_tokens),
-            completion=str(completion_tokens),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
-        return float(cost) if cost else 0.0
+        return float(input_cost) + float(output_cost)
     except Exception:
-        # Fallback: very rough estimate.
-        # Gemini Flash-Lite: ~$0.075/1M input, $0.30/1M output
+        # Fallback: Gemini Flash-Lite pricing (~$0.075/1M in, $0.30/1M out).
         input_cost = prompt_tokens * 0.000000075
         output_cost = completion_tokens * 0.0000003
         return input_cost + output_cost

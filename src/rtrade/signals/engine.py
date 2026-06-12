@@ -11,13 +11,14 @@ In P2+, it would be passed to the LLM pipeline first.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pandas as pd
 import structlog
 
 from rtrade.core.config import InstrumentConfig
 from rtrade.core.constants import Timeframe
+from rtrade.core.timeutil import timeframe_duration
 from rtrade.indicators.structure import GapZone, SRLevel
 from rtrade.signals.confluence import ConfluenceContext, compute_confluence
 from rtrade.signals.edge_quality import EdgeQualityConfig, assess_edge_quality
@@ -45,6 +46,7 @@ def generate_candidate(
     rr_min: float = 1.5,
     confluence_min_score: int = 60,
     valid_bars: int = 6,
+    timeframe: Timeframe = Timeframe.H1,
     spread: float | None = None,
     edge_quality_enabled: bool = True,
     edge_quality_config: EdgeQualityConfig | None = None,
@@ -147,10 +149,12 @@ def generate_candidate(
     if position_size <= 0:
         return None
 
-    # 9. Compute valid_until.
-    tf = Timeframe.H1  # S1 signals on 1H
-    bar_ts = pd.Timestamp(df.index[-1]).to_pydatetime().replace(tzinfo=UTC)
-    valid_until = bar_ts + timedelta(hours=valid_bars)
+    # 9. Compute valid_until (bar close + valid_bars × timeframe).
+    tf = timeframe
+    raw_ts = pd.Timestamp(df.index[-1]).to_pydatetime()
+    bar_ts = raw_ts if raw_ts.tzinfo is not None else raw_ts.replace(tzinfo=UTC)
+    bar_close = bar_ts + timeframe_duration(tf)
+    valid_until = bar_close + valid_bars * timeframe_duration(tf)
 
     # 10. Build frozen candidate.
     now = datetime.now(UTC)

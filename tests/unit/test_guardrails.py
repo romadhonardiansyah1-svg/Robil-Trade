@@ -150,3 +150,32 @@ class TestGuardrailGate:
         )
         assert not result.passed
         assert any(f.gate_id == "GR-13" for f in result.failures)
+
+    def test_gate_fails_closed_when_calendar_stale(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(
+            candidate,
+            calendar_stale=True,
+            regime=Regime.TREND,
+            required_regime=Regime.TREND,
+            now=datetime(2026, 7, 1, 6, 0, tzinfo=UTC),
+        )
+        assert not result.passed
+        assert any(f.gate_id == "GR-07" for f in result.failures)
+
+    def test_gate_passes_when_calendar_fresh(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(
+            candidate,
+            calendar_stale=False,
+            regime=Regime.TREND,
+            required_regime=Regime.TREND,
+            now=datetime(2026, 7, 1, 6, 0, tzinfo=UTC),
+        )
+        # No GR-07 from staleness (may still have other failures).
+        gr07_stale = [f for f in result.failures if f.gate_id == "GR-07" and "stale" in f.reason]
+        assert len(gr07_stale) == 0

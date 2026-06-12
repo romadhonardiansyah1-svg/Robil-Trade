@@ -154,3 +154,27 @@ class TestLLMClient:
         assert stats["call_count"] == 0
         assert stats["total_cost_usd"] == 0
         assert stats["total_tokens"] == 0
+
+
+class TestEstimateCost:
+    def test_estimate_cost_uses_cost_per_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from rtrade.llm import client as client_mod
+
+        def fake_cost_per_token(*, model: str, prompt_tokens: int, completion_tokens: int):  # type: ignore[no-untyped-def]
+            return (0.001, 0.002)
+
+        monkeypatch.setattr("litellm.cost_per_token", fake_cost_per_token, raising=False)
+        # Reload to pick up patched import
+        result = client_mod._estimate_cost("x", 100, 50)
+        assert result == pytest.approx(0.003)
+
+    def test_estimate_cost_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from rtrade.llm import client as client_mod
+
+        def raise_exc(*, model: str, prompt_tokens: int, completion_tokens: int):  # type: ignore[no-untyped-def]
+            raise Exception("no pricing data")
+
+        monkeypatch.setattr("litellm.cost_per_token", raise_exc, raising=False)
+        result = client_mod._estimate_cost("unknown-model", 100, 50)
+        expected = 100 * 7.5e-8 + 50 * 3e-7
+        assert result == pytest.approx(expected)

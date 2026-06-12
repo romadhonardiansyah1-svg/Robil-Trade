@@ -52,6 +52,8 @@ def run_gate(
     related_currencies: list[str] | None = None,
     news_blackout_before_min: int = 30,
     news_blackout_after_min: int = 15,
+    # GR-07b: calendar staleness
+    calendar_stale: bool = False,
     # GR-08: regime
     regime: Regime | None = None,
     required_regime: Regime | None = None,
@@ -145,6 +147,15 @@ def run_gate(
                     reason=f"price drift {drift_pct:.2f}% > {price_drift_max_pct}% max",
                 )
             )
+
+    # --- GR-07b: fail-CLOSED when the economic calendar is stale ---
+    if calendar_stale:
+        failures.append(
+            GateFailure(
+                gate_id="GR-07",
+                reason="economic calendar is stale/empty — fail-closed for non-crypto",
+            )
+        )
 
     # --- GR-07: News blackout ---
     if events is not None and related_currencies is not None:

@@ -34,6 +34,7 @@ risk:
   news_blackout_before_min: 30    # GR-07
   news_blackout_after_min: 15
   expectancy_guard_window: 30     # GR-13: rolling N paper-trades
+  equity_usd: 10000               # equity acuan sizing (ubah sesuai akun)
 
 llm:
   enabled: false                  # P1=false, P2=true

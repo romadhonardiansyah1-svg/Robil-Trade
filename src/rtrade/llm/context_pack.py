@@ -193,16 +193,24 @@ def build_context_pack(
 
     # --- Calendar (next 72h) ---
     calendar_entries: list[dict[str, Any]] = []
+    injection_detected = False
     for evt in calendar_events[:20]:  # limit
+        from rtrade.llm.sanitize import contains_injection, sanitize_untrusted
+
+        raw_event_name = str(evt.get("event", "unknown"))
+        if contains_injection(raw_event_name):
+            injection_detected = True
+            logger.warning("prompt injection detected in calendar event", event=raw_event_name[:50])
+        sanitized_name = sanitize_untrusted(raw_event_name)
         sid = _make_source_id(
             "cal",
-            evt.get("event", "unknown"),
+            sanitized_name,
             evt.get("currency", "UNK"),
             tf_str,
             evt.get("event_time", bar_ts),
         )
         source_ids.append(sid)
-        calendar_entries.append({**evt, "source_id": sid})
+        calendar_entries.append({**evt, "event": sanitized_name, "source_id": sid})
 
     # --- Derivatives (crypto only) ---
     deriv_data: dict[str, Any] | None = None
@@ -258,6 +266,10 @@ def build_context_pack(
     pack_id = hashlib.sha256(f"{symbol}:{tf_str}:{bar_ts}:{now.isoformat()}".encode()).hexdigest()[
         :16
     ]
+
+    # S4: mark pack if prompt injection was detected in input data
+    if injection_detected:
+        instrument["_injection_detected"] = True
 
     return ContextPack(
         pack_id=f"pack_{pack_id}",

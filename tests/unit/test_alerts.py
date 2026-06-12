@@ -162,3 +162,23 @@ class TestHealthCheckerDisk:
         )
         assert "used_pct" in result.details
         assert "free_gb" in result.details
+
+
+class TestHealthCheckerLitellmOptional:
+    """D2: litellm check is optional — skip when URL empty, DEGRADED when unreachable."""
+
+    @pytest.mark.asyncio
+    async def test_empty_url_skips_litellm(self) -> None:
+        """HealthChecker(litellm_url='').run_all() should NOT contain a 'litellm' check."""
+        checker = HealthChecker(litellm_url="")
+        result = await checker.check_litellm()
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_unreachable_url_returns_degraded(self) -> None:
+        """With a URL set (but unreachable), litellm check should be DEGRADED."""
+        checker = HealthChecker(litellm_url="http://127.0.0.1:49999")
+        result = await checker.check_litellm()
+        assert result is not None
+        assert result.name == "litellm"
+        assert result.status == HealthStatus.DEGRADED

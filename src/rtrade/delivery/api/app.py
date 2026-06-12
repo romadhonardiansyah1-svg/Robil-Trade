@@ -16,3 +16,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(router)
     return app
+
+
+# Module-level app for uvicorn (compose: rtrade.delivery.api.app:app).
+app = create_app()

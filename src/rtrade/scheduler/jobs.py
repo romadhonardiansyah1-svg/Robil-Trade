@@ -107,7 +107,6 @@ async def health_check_job() -> None:
 
 async def hmm_train_job() -> None:
     """Weekly HMM retrain per instrument (Sunday 02:00 UTC) (W8)."""
-    import joblib
     import pandas as pd
 
     from rtrade.core.constants import Timeframe
@@ -146,9 +145,11 @@ async def hmm_train_job() -> None:
                 detector.train(df)
                 from pathlib import Path
 
+                from rtrade.ml.model_io import save_model
+
                 out = Path("models")
                 out.mkdir(exist_ok=True)
-                joblib.dump(detector, out / f"hmm_{inst.symbol}.joblib")
+                save_model(detector, out / f"hmm_{inst.symbol}.joblib")
                 logger.info("hmm trained", symbol=inst.symbol)
     finally:
         await engine.dispose()

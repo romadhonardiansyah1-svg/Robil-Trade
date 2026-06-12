@@ -81,7 +81,6 @@ _HMM_CACHE: dict[str, Any] = {}
 
 def _hmm_shadow_classify(symbol: str, df: pd.DataFrame) -> Any | None:
     """Classify with saved HMM model; None when no model on disk (W8)."""
-    import joblib
 
     from rtrade.regime.hmm import HMMRegimeDetector
 
@@ -90,7 +89,9 @@ def _hmm_shadow_classify(symbol: str, df: pd.DataFrame) -> Any | None:
         path = Path("models") / f"hmm_{symbol}.joblib"
         if not path.exists():
             return None
-        detector = joblib.load(path)
+        from rtrade.ml.model_io import load_model
+
+        detector = load_model(path)
         _HMM_CACHE[symbol] = detector
     if not isinstance(detector, HMMRegimeDetector) or not detector.is_trained:
         return None

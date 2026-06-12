@@ -305,18 +305,17 @@ class MetaLabeler:
         return self._feature_importances.copy()
 
     def save(self, path: Path) -> None:
-        """Save model to disk."""
+        """Save model to disk with integrity sidecar."""
         if self._model is None:
             raise RuntimeError("no model to save")
-        import joblib
+        from rtrade.ml.model_io import save_model
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self._model, path)
+        save_model(self._model, path)
         logger.info("meta-labeler saved", path=str(path))
 
     def load(self, path: Path) -> None:
-        """Load model from disk."""
-        import joblib
+        """Load model from disk with integrity verification."""
+        from rtrade.ml.model_io import load_model
 
-        self._model = joblib.load(path)
+        self._model = load_model(path)
         logger.info("meta-labeler loaded", path=str(path))

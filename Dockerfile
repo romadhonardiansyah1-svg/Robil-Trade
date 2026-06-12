@@ -64,14 +64,13 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Create data directories.
-RUN mkdir -p /app/data /app/reports /app/logs && \
+RUN mkdir -p /app/data /app/reports /app/logs /app/models && \
     chown -R rtrade:rtrade /app
 
 USER rtrade
 
-# Health check — uvicorn API health endpoint.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://localhost:8000/health || exit 1
+# Per-service health checks are defined in docker-compose.prod.yml.
+# A global check here would only be valid for the api container.
 
 EXPOSE 8000
 

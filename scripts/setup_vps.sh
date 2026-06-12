@@ -255,8 +255,8 @@ clone_repo() {
     chown -R "$APP_USER:$APP_USER" "$INSTALL_DIR"
     
     # Create data directories
-    mkdir -p "$INSTALL_DIR"/{data,reports,logs}
-    chown -R "$APP_USER:$APP_USER" "$INSTALL_DIR"/{data,reports,logs}
+    mkdir -p "$INSTALL_DIR"/{data,reports,logs,models}
+    chown -R "$APP_USER:$APP_USER" "$INSTALL_DIR"/{data,reports,logs,models}
     success "Directories created"
 }
 
@@ -324,8 +324,10 @@ GEMINI_API_KEY_1=${GEMINI_KEY_1}
 GEMINI_API_KEY_2=${GEMINI_KEY_2}
 ANTHROPIC_API_KEY_1=
 OPENAI_API_KEY_1=
-LITELLM_MASTER_KEY=${LITELLM_KEY}
-LITELLM_BASE_URL=http://litellm:4000
+# LITELLM_MASTER_KEY / LITELLM_BASE_URL tidak dipakai (LLM = library mode sejak F1).
+
+# === Trading config (opsional, default aman) ===
+# llm.enabled diatur via config/settings.yaml, bukan .env
 
 # === Telegram ===
 TELEGRAM_BOT_TOKEN=${TELEGRAM_TOKEN}
@@ -361,10 +363,12 @@ build_and_start() {
     success "Docker images built"
     
     info "Starting all services..."
+    local profiles=""
+    [[ -n "${TELEGRAM_TOKEN:-}" ]] && profiles="--profile telegram"
     sudo -u "$APP_USER" docker compose \
         -f docker-compose.yml \
         -f docker-compose.prod.yml \
-        up -d 2>&1 | tail -10
+        $profiles up -d 2>&1 | tail -10
     success "All services started"
     
     # Wait for services to be ready
@@ -378,7 +382,7 @@ build_and_start() {
             | jq -r '.Health // .State' 2>/dev/null \
             | grep -c "healthy\|running" || echo "0")
         
-        if [[ $healthy -ge 5 ]]; then
+        if [[ $healthy -ge 6 ]]; then
             break
         fi
         
@@ -423,9 +427,19 @@ run_migrations() {
     info "Running Alembic migrations..."
     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
         exec -T app python -m alembic upgrade head 2>&1 || {
-        warn "Migration failed (mungkin belum ada migration files). Skipping..."
+        warn "Migration failed on first try, retrying..."
+        sleep 5
+        docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+            exec -T app python -m alembic upgrade head 2>&1 || {
+            warn "Migration failed again. Check alembic configuration."
+        }
     }
     success "Database migration complete"
+
+    # Verify tables
+    info "Verifying database tables..."
+    docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+        exec -T db psql -U rtrade -d rtrade -c "\dt" 2>&1 | head -30
 }
 
 # ============================================================================
@@ -466,10 +480,12 @@ LOGROTATE
     # Re-start services after Docker restart
     cd "$INSTALL_DIR"
     sleep 3
+    local profiles=""
+    [[ -n "${TELEGRAM_TOKEN:-}" ]] && profiles="--profile telegram"
     sudo -u "$APP_USER" docker compose \
         -f docker-compose.yml \
         -f docker-compose.prod.yml \
-        up -d > /dev/null 2>&1
+        $profiles up -d > /dev/null 2>&1
     success "Services restarted with new log config"
 }
 
@@ -532,6 +548,9 @@ verify_and_summary() {
     echo -e "${CYAN}║${NC}  2. Send /health to Telegram bot                             ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  3. Monitor logs: make prod-logs                              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  4. Start 4-8 week paper calibration (P4-T6)                 ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  5. Backfill data : ./scripts/backfill_all.sh                 ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  6. Validasi      : docker compose ... exec app               ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}     python scripts/run_backtest.py ... --walkforward           ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  ${RED}⚠️  DISCLAIMER: Sinyal analisis BUKAN nasihat keuangan.${NC}    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  ${RED}Selalu gunakan manajemen risiko yang ketat.${NC}               ${CYAN}║${NC}"

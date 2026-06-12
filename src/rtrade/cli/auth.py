@@ -169,6 +169,82 @@ def _all_provider_ids() -> list[str]:
         return []
 
 
+def _cmd_models(args: argparse.Namespace) -> None:
+    from rtrade.llm.auth.model_catalog import list_provider_models
+    from rtrade.llm.auth.provider_profiles import load_provider_profiles
+
+    profiles = load_provider_profiles(None)
+    if args.provider not in profiles:
+        print(f"Provider '{args.provider}' tidak ditemukan.")  # noqa: T201
+        return
+    models = asyncio.run(list_provider_models(profiles[args.provider]))
+    print(f"Models for {args.provider}:")  # noqa: T201
+    for m in models:
+        print(f"  - {m}")  # noqa: T201
+
+
+def _cmd_use(args: argparse.Namespace) -> None:
+    """Set model_routes[role] to use specific provider + model."""
+    from pathlib import Path
+
+    import yaml
+
+    from rtrade.llm.auth.model_catalog import list_provider_models
+    from rtrade.llm.auth.provider_profiles import load_provider_profiles
+
+    profiles = load_provider_profiles(None)
+    if args.provider not in profiles:
+        print(f"Provider '{args.provider}' tidak ditemukan.")  # noqa: T201
+        sys.exit(1)
+    profile = profiles[args.provider]
+    if not profile.enabled:
+        print(  # noqa: T201
+            f"Provider '{args.provider}' disabled. "
+            f"Jalankan: rtrade auth login --provider {args.provider}"
+        )
+        sys.exit(1)
+
+    # Validate model in catalog (unless --force)
+    if not getattr(args, "force", False):
+        models = asyncio.run(list_provider_models(profile))
+        if models and args.model not in models:
+            print(  # noqa: T201
+                f"Model '{args.model}' tidak ada di katalog {args.provider}. "
+                f"Tersedia: {models}. Gunakan --force untuk override."
+            )
+            sys.exit(1)
+
+    # Determine auth_profile name for this provider
+    auth_profile_name = f"{args.provider}_cli_oauth"
+    if profile.auth_mode == "vertex":
+        auth_profile_name = f"{args.provider}_vertex"
+    elif profile.auth_mode == "api_key":
+        auth_profile_name = f"{args.provider}_api_key"
+
+    # Update settings.yaml
+    settings_path = Path("config") / "settings.yaml"
+    if settings_path.exists():
+        with settings_path.open("r", encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh) or {}
+    else:
+        doc = {}
+
+    llm = doc.setdefault("llm", {})
+    routes = llm.setdefault("model_routes", {})
+    routes[args.role] = {
+        "model": args.model,
+        "auth_profile": auth_profile_name,
+    }
+
+    with settings_path.open("w", encoding="utf-8") as fh:
+        yaml.dump(doc, fh, default_flow_style=False, allow_unicode=True)
+
+    print(  # noqa: T201
+        f"role={args.role} → model={args.model} "
+        f"via provider={args.provider} (auth={profile.auth_mode})"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="rtrade-auth", description="OAuth auth management")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -193,6 +269,15 @@ def main() -> None:
     doctor = sub.add_parser("doctor", help="Diagnose provider config")
     doctor.add_argument("--provider", required=True)
 
+    models = sub.add_parser("models", help="List models for a provider")
+    models.add_argument("--provider", required=True)
+
+    use = sub.add_parser("use", help="Set model route for a role")
+    use.add_argument("--role", required=True, choices=["analyst", "critic", "backup", "flagship"])
+    use.add_argument("--provider", required=True)
+    use.add_argument("--model", required=True)
+    use.add_argument("--force", action="store_true", help="Skip model catalog validation")
+
     args = parser.parse_args()
     dispatch = {
         "login": _cmd_login,
@@ -200,6 +285,8 @@ def main() -> None:
         "status": _cmd_status,
         "logout": _cmd_logout,
         "doctor": _cmd_doctor,
+        "models": _cmd_models,
+        "use": _cmd_use,
     }
     dispatch[args.cmd](args)
 

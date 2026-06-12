@@ -109,6 +109,16 @@ async def run_worker() -> None:
     from rtrade.core.logging_setup import configure_logging
 
     configure_logging()
+
+    # S11: guardrail integrity self-test — fail-closed if broken
+    from rtrade.guardrails.selftest import run_guardrail_selftest
+
+    problems = run_guardrail_selftest()
+    if problems:
+        logger.critical("guardrail selftest FAILED — refusing to start", problems=problems)
+        raise SystemExit(1)
+    logger.info("guardrail selftest passed")
+
     logger.info("starting Robil Trade worker")
 
     scheduler = create_scheduler()

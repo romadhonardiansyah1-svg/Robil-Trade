@@ -1,4 +1,4 @@
-# IMPLEMENTATION TASKS 6 — PLUGGABLE OAUTH AUTH LAYER (O0–O13)
+# IMPLEMENTATION TASKS 6 — PLUGGABLE OAUTH AUTH LAYER (O0–O14)
 
 > Tujuan: dukung **login OAuth multi-provider** untuk LLM (Gemini, Claude, GPT) lewat jalur
 > identitas cloud yang SAH — bukan API key mentah. Hasil akhir: `rtrade auth login` (device-code,
@@ -25,6 +25,54 @@
 > lapisan Hermes-style penuh (provider profiles + per-model routing) yang **menggantikan** wiring
 > global O6. Lihat catatan supersede di O6 & O11 agar tidak meninggalkan kode mati / dua jalur
 > pemilihan model yang bertabrakan.
+
+---
+
+## 0K — KONVENSI KANONIK (resolusi konflik antar-task — BACA & PATUHI SEBELUM MULAI)
+
+Beberapa task menulis hal yang sama dengan bentuk berbeda. Bagian ini adalah **SATU-SATUNYA sumber
+kebenaran**. Bila ada potongan kode di task lain yang bentrok dengan sini, IKUTI SINI.
+
+**K1 — `AuthMaterial` didefinisikan SEKALI saja** (di O1, `src/rtrade/llm/auth/base.py`). O14 TIDAK
+mendefinisikan ulang; ia hanya MEMAKAI. Bentuk kanonik (semua field baru diberi DEFAULT supaya
+konstruksi lama `AuthMaterial(api_key=...)` / `AuthMaterial(extra_kwargs=...)` di O1/O3/O4 tidak pecah):
+```python
+@dataclass(frozen=True, slots=True)
+class AuthMaterial:
+    api_key: str | None = None
+    bearer_token: str | None = None
+    extra_kwargs: dict[str, Any] = field(default_factory=dict)
+    auth_type: str = "api_key"      # "api_key" | "cli_oauth" | "vertex" | "azure_ad"
+    provider_id: str = ""
+    profile_name: str = ""
+
+    def merge_into(self, kwargs: dict[str, Any]) -> None:
+        token = self.bearer_token or self.api_key   # LiteLLM memakai 'api_key' sbg slot bearer
+        if token:
+            kwargs["api_key"] = token
+        kwargs.update(self.extra_kwargs)
+```
+
+**K2 — SATU file manifest** = `config/oauth_providers.example.yaml` (top-key `oauth_providers:`).
+File `ai_auth_providers.example.yaml` yang disebut O14 **DIBATALKAN** — lebur semua field-nya ke
+manifest tunggal ini. Loader hanya `provider_profiles.load_provider_profiles()` (O8).
+
+**K3 — ID provider KANONIK** (pakai PERSIS ini di O8/O11/O13/O14):
+`google_vertex`, `azure_openai`, `openai_codex`, `xai`, `generic_gateway`, `custom_external`.
+DILARANG varian lain (`openai_codex_oauth`, `xai_oauth`, dst). Nama `auth_profile` bebas, tapi
+`provider_id` di dalamnya WAJIB salah satu ID kanonik ini.
+
+**K4 — `LLMClient.complete()` SUDAH menerima `model: str` per-panggilan.** JANGAN tambah param `model`
+kedua di konstruktor. O11/O14 hanya mengubah SUMBER nilai `model` (dari `resolve_model_auth`) +
+menyuntik `credential_provider`. Di `complete()`: bila `self._credential_provider` ada →
+`material = await self._credential_provider.resolve(); material.merge_into(kwargs)`; else perilaku
+lama. TIDAK ADA cabang "OAuth belum didukung" di runtime.
+
+**K5 — SATU kelas OAuth** = `OAuth2Provider` (O3). `CliOAuthProvider` (O14) adalah pembungkus tipis
+di atas `OAuth2Provider` + dukungan `external_command`; JANGAN buat implementasi OAuth kedua terpisah.
+
+**K6 — Semua I/O auth async-aman:** pakai `await asyncio.sleep(...)` (BUKAN `time.sleep`) di coroutine,
+dan `httpx.AsyncClient`. JANGAN pernah `logger`-kan token/secret apa pun (selaras S2 redaction).
 
 ---
 
@@ -62,15 +110,24 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class AuthMaterial:
-    """Bahan auth yang diteruskan ke litellm.acompletion(**kwargs)."""
+    """Bahan auth yang diteruskan ke litellm.acompletion(**kwargs). Bentuk KANONIK (lihat 0K/K1).
+
+    Semua field punya default → konstruksi `AuthMaterial(api_key=...)` /
+    `AuthMaterial(extra_kwargs=...)` tetap valid. O14 TIDAK mendefinisikan ulang kelas ini.
+    """
 
     api_key: str | None = None
+    bearer_token: str | None = None
     extra_kwargs: dict[str, Any] = field(default_factory=dict)  # mis. vertex_project, azure_ad_token
+    auth_type: str = "api_key"  # "api_key" | "cli_oauth" | "vertex" | "azure_ad"
+    provider_id: str = ""
+    profile_name: str = ""
 
     def merge_into(self, kwargs: dict[str, Any]) -> None:
-        """Terapkan ke kwargs litellm (in-place)."""
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
+        """Terapkan ke kwargs litellm (in-place). LiteLLM memakai 'api_key' sbg slot bearer."""
+        token = self.bearer_token or self.api_key
+        if token:
+            kwargs["api_key"] = token
         kwargs.update(self.extra_kwargs)
 
 
@@ -106,7 +163,7 @@ class ApiKeyProvider(CredentialProvider):
         return "api_key"
 
     async def resolve(self) -> AuthMaterial:
-        return AuthMaterial(api_key=self.api_key)
+        return AuthMaterial(api_key=self.api_key, auth_type="api_key")
 ```
 
 **Test** `tests/unit/test_auth_base.py`: `ApiKeyProvider("k").resolve()` → `api_key=="k"`;
@@ -215,6 +272,7 @@ menunjuk ke layanan yang memang menyediakan akses programatik.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -307,7 +365,7 @@ class OAuth2Provider(CredentialProvider):
             interval = float(d.get("interval", 5))
             device_code = d["device_code"]
             while True:
-                time.sleep(interval)
+                await asyncio.sleep(interval)  # K6: async-aman, jangan blok event loop
                 poll = await client.post(
                     self.token_url,
                     data={
@@ -374,10 +432,12 @@ class VertexProvider(CredentialProvider):
         # litellm + google-auth menangani refresh ADC sendiri; kita cukup
         # meneruskan project/location. (ADC dibaca dari env/credential file.)
         return AuthMaterial(
+            auth_type="vertex",
+            provider_id="google_vertex",
             extra_kwargs={
                 "vertex_project": self.project,
                 "vertex_location": self.location,
-            }
+            },
         )
 
 
@@ -419,7 +479,9 @@ def _google_login() -> None:
 
     client_secrets = _require_env("GOOGLE_OAUTH_CLIENT_SECRETS")  # path JSON dari GCP console
     flow = InstalledAppFlow.from_client_secrets_file(client_secrets, scopes=_GOOGLE_SCOPES)
-    creds = flow.run_local_server(port=0)  # buka browser; fallback console bila headless
+    # CATATAN: run_local_server() butuh browser di mesin ini — akan GAGAL/menggantung di VPS headless.
+    # Untuk VPS pakai flow paste_url (O12). Versi O12 menggantikan baris ini.
+    creds = flow.run_local_server(port=0)
     # Simpan ke ADC well-known path supaya google-auth & litellm otomatis memakainya.
     import json
     from pathlib import Path
@@ -480,10 +542,16 @@ hapus GOOGLE_APPLICATION_CREDENTIALS + monkeypatch `google.auth.default` raise).
 Hanya kerjakan bila user butuh GPT via Azure OpenAI.
 1. O0-style: tambah `azure-identity>=1.19` ke deps (uv lock/sync).
 2. `src/rtrade/llm/auth/azure_ad.py` — `AzureADProvider(tenant, client_id, client_secret,
-   scope="https://cognitiveservices.azure.com/.default")` → `resolve()` pakai
-   `azure.identity.ClientSecretCredential.get_token(scope)` → `extra_kwargs={"azure_ad_token": ...,
-   "api_base": <endpoint>, "api_version": ...}`.
-**Test**: monkeypatch credential → token dummy → extra_kwargs berisi azure_ad_token.
+   endpoint, scope="https://cognitiveservices.azure.com/.default")` → `resolve()` pakai
+   `azure.identity.ClientSecretCredential.get_token(scope)` →
+   `AuthMaterial(auth_type="azure_ad", provider_id="azure_openai",
+   extra_kwargs={"azure_ad_token": ..., "api_base": endpoint, "api_version": ...})`.
+3. **WAJIB** tambahkan classmethod `from_env()` (dipanggil registry O6) — baca env
+   `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_OPENAI_ENDPOINT`;
+   bila ada yang kosong → `raise ConfigError("Azure OpenAI env belum lengkap: ...")` (pesan jelas,
+   bukan KeyError mentah).
+**Test**: monkeypatch credential → token dummy → extra_kwargs berisi azure_ad_token;
+`from_env()` tanpa env → ConfigError.
 **Commit**: `feat(auth): Azure AD provider for Azure OpenAI (O5)`
 
 ---
@@ -537,11 +605,20 @@ Hanya kerjakan bila user butuh GPT via Azure OpenAI.
        return ApiKeyProvider(api_key=secrets.gemini_api_key_1)
 
 
+   def _require_env(name: str) -> str:
+       val = os.environ.get(name)
+       if not val:
+           from rtrade.core.errors import ConfigError
+
+           raise ConfigError(f"env {name} wajib diisi untuk OAuth mode (lihat docs/AUTH_OAUTH.md)")
+       return val
+
+
    def build_generic_oauth_from_env() -> OAuth2Provider:
        return OAuth2Provider(
-           provider_id=os.environ.get("RTRADE_OAUTH_PROVIDER_ID", "generic"),
-           token_url=os.environ["RTRADE_OAUTH_TOKEN_URL"],
-           client_id=os.environ["RTRADE_OAUTH_CLIENT_ID"],
+           provider_id=os.environ.get("RTRADE_OAUTH_PROVIDER_ID", "generic_gateway"),
+           token_url=_require_env("RTRADE_OAUTH_TOKEN_URL"),
+           client_id=_require_env("RTRADE_OAUTH_CLIENT_ID"),
            client_secret=os.environ.get("RTRADE_OAUTH_CLIENT_SECRET", ""),
            scopes=os.environ.get("RTRADE_OAUTH_SCOPES", "").split(),
            grant_type=os.environ.get("RTRADE_OAUTH_GRANT", "client_credentials"),
@@ -1139,6 +1216,12 @@ Select-String -Path config\oauth_providers.example.yaml -Pattern "models:|models
 
 ## O14 — Koreksi final: OAuth CLI harus setara API key di runtime
 
+> **PENYELARASAN dengan 0K (wajib):** contoh di O14 di bawah memakai nama lama
+> (`ai_auth_providers.example.yaml`, `openai_codex_oauth`, `xai_oauth`). IKUTI 0K, bukan contoh ini:
+> manifest tunggal = `config/oauth_providers.example.yaml` (K2); `provider_id` kanonik = `openai_codex`
+> / `xai` / `custom_external` (K3, BUKAN varian `*_oauth`); `AuthMaterial` tidak didefinisikan ulang
+> (K1). Nama `auth_profile` (mis. `openai_codex_cli_oauth`) bebas — yang dikunci hanya `provider_id`.
+
 Ini revisi eksplisit atas O8-O13: OAuth tidak boleh berhenti sebagai "doctor/status/stub".
 Untuk bot, `api_key` dan `cli_oauth` harus punya kedudukan sama sebagai **auth profile**. Bedanya
 hanya cara mendapatkan kredensial:
@@ -1245,27 +1328,10 @@ ai_auth_providers:
 
 ### Implementasi wajib
 
-1. `AuthMaterial` jadi bentuk umum:
-   ```python
-   @dataclass(frozen=True, slots=True)
-   class AuthMaterial:
-       auth_type: str
-       provider_id: str
-       profile_name: str
-       api_key: str | None = None
-       bearer_token: str | None = None
-       extra_kwargs: dict[str, Any] = field(default_factory=dict)
-
-       def merge_into(self, kwargs: dict[str, Any]) -> None:
-           if self.api_key:
-               kwargs["api_key"] = self.api_key
-           if self.bearer_token:
-               kwargs["api_key"] = self.bearer_token
-           kwargs.update(self.extra_kwargs)
-   ```
-   Catatan pragmatis: LiteLLM sering memakai `api_key` sebagai bearer token provider. Jadi
-   `bearer_token` boleh dimasukkan ke `kwargs["api_key"]`, tetapi internal log tetap menyebutnya
-   `cli_oauth`, bukan API key.
+1. `AuthMaterial` — **JANGAN definisikan ulang di sini.** Pakai bentuk KANONIK dari 0K/K1 (sudah
+   punya `auth_type`/`provider_id`/`profile_name`/`bearer_token` dengan default + `merge_into` yang
+   memetakan bearer→`kwargs["api_key"]`). O14 cukup MEMAKAI-nya. Log internal tetap menyebut
+   `cli_oauth`, bukan "API key".
 
 2. `CliOAuthProvider.resolve()`:
    - load token dari token store.
@@ -1295,14 +1361,18 @@ ai_auth_providers:
    - 401/403 pada OAuth profile -> status `login_expired` + fallback backup bila ada.
    - refresh gagal tidak mematikan bot bila backup route tersedia.
 
-7. `external_command`:
-   - disediakan untuk adapter provider non-standar/Hermes-like.
-   - command harus mengembalikan JSON standar:
+7. `external_command` (adapter provider non-standar/Hermes-like) — **WAJIB aman:**
+   - command mengembalikan JSON standar di STDOUT:
      ```json
      {"access_token":"...", "refresh_token":"...", "expires_in":3600, "token_type":"Bearer"}
      ```
-   - core bot tidak perlu tahu bagaimana adapter mendapat token; core hanya menerima token hasil login
-     dan memperlakukannya sama seperti API key di runtime.
+   - Jalankan dengan `subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=120)`
+     — **`shell=False` wajib** (cegah shell injection); validasi `argv[0]` ada & executable dulu.
+   - **JANGAN kirim secret via argv** (terlihat di `ps`/process list) — lewat env/stdin saja.
+   - **JANGAN pernah `logger`-kan stdout adapter** (berisi token). Log hanya
+     `provider_id` + `exit_code` + `expires_at`.
+   - stdout bukan-JSON / exit≠0 → `ConfigError` jelas (tanpa mencetak isi stdout).
+   - core bot memperlakukan token hasil ini sama seperti API key di runtime (lewat `AuthMaterial`).
 
 ### Test wajib
 

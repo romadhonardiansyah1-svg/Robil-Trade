@@ -6,6 +6,7 @@ Melindungi dari kebocoran API key/token/secret ke log, baik di key maupun di val
 from __future__ import annotations
 
 import re
+from collections.abc import MutableMapping
 from typing import Any
 
 _SENSITIVE_KEYS = re.compile(
@@ -20,7 +21,9 @@ _PATTERNS = [
 ]
 
 
-def redact_processor(_logger: Any, _name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
+def redact_processor(
+    _logger: Any, _name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """structlog processor: redact sensitive values before rendering."""
     for k, v in list(event_dict.items()):
         if _SENSITIVE_KEYS.search(k):

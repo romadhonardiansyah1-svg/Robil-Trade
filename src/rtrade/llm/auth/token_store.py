@@ -13,8 +13,12 @@ import stat
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
+
+if TYPE_CHECKING:
+    from cryptography.fernet import Fernet
 
 logger = structlog.get_logger(__name__)
 
@@ -34,7 +38,7 @@ def _token_dir() -> Path:
     return path
 
 
-def _fernet():  # type: ignore[no-untyped-def]
+def _fernet() -> Fernet | None:
     key = os.environ.get("RTRADE_TOKEN_KEY", "")
     if not key:
         return None

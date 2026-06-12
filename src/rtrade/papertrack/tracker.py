@@ -163,6 +163,8 @@ def replay_signal(
     sl_dist = abs(entry_limit - stop_loss) or 1.0
 
     for bar in candles:
+        if bar.ts is None:
+            continue  # time-based logic needs a timestamp
         ts = ensure_utc(bar.ts)
         if not filled:
             if ts > ensure_utc(valid_until):

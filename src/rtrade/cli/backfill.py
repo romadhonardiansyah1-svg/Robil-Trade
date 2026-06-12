@@ -14,9 +14,10 @@ from pathlib import Path
 
 import structlog
 
-from rtrade.core.config import AppConfig
+from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Timeframe
 from rtrade.core.errors import ConfigError
+from rtrade.data.base import MarketDataProvider
 from rtrade.data.ingestion import ingest_candles
 from rtrade.data.ratelimit import RateLimiter
 from rtrade.persistence.db import create_engine, create_session_factory
@@ -25,7 +26,9 @@ from rtrade.persistence.repositories import CandleRepo, InstrumentRepo
 logger = structlog.get_logger(__name__)
 
 
-def _make_provider(instrument, cfg, limiter):  # type: ignore[no-untyped-def]
+def _make_provider(
+    instrument: InstrumentConfig, cfg: AppConfig, limiter: RateLimiter
+) -> MarketDataProvider:
     from rtrade.data.ccxt_provider import CcxtProvider
     from rtrade.data.twelvedata_provider import TwelveDataProvider
 

@@ -141,21 +141,21 @@ def run_backtest(
         # Phase 2: After fill, check SL/TP on subsequent bars.
         # If smart_exit is configured, use apply_smart_exit per bar.
         if smart_exit is not None:
+            fill_price = trade.fill_price
+            assert fill_price is not None  # guaranteed by the fill phase above
             atr_col = df["atr"].astype(float).values if "atr" in df.columns else None
             exit_state = ExitState(
                 current_sl=trade.stop_loss,
             )
             for i in range(trade.fill_bar + 1, n_bars):  # type: ignore[operator]
                 atr_val = (
-                    float(atr_col[i])
-                    if atr_col is not None
-                    else abs(trade.fill_price - trade.stop_loss)
-                )  # type: ignore[index]
+                    float(atr_col[i]) if atr_col is not None else abs(fill_price - trade.stop_loss)
+                )
                 exit_state, exit_reason = apply_smart_exit(
                     exit_state,
                     smart_exit,
                     direction=trade.direction,
-                    entry=trade.fill_price,  # type: ignore[arg-type]
+                    entry=fill_price,
                     original_sl=trade.stop_loss,
                     take_profit=trade.take_profit,
                     bar_high=highs[i],

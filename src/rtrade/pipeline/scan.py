@@ -38,7 +38,7 @@ from rtrade.papertrack.minute_resolution import resolve_ambiguous_bar
 from rtrade.papertrack.tracker import CandleBar, replay_signal
 from rtrade.papertrack.virtual_exits import evaluate_virtual_exits
 from rtrade.persistence.db import create_engine, create_session_factory
-from rtrade.persistence.models import EconomicEvent, Signal
+from rtrade.persistence.models import DerivativesSnapshot, EconomicEvent, Signal
 from rtrade.persistence.repositories import (
     AuditRepo,
     CandleRepo,
@@ -246,6 +246,14 @@ async def run_scan(
                         "oi_change_24h": None,
                         "open_interest": float(oi.open_interest),
                     }
+                    session.add(
+                        DerivativesSnapshot(
+                            instrument_id=inst_row.id,
+                            ts=now,
+                            funding_rate=funding.funding_rate,
+                            open_interest=oi.open_interest,
+                        )
+                    )
                 except ProviderError as exc:
                     logger.warning("derivatives fetch failed", error=str(exc))
 

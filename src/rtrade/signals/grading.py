@@ -81,3 +81,16 @@ def grade_signal(
         reasons.append(f"confidence={confidence:.2f}<0.55")
 
     return GradeResult(grade=Grade.C, reasons=reasons)
+
+
+# F4: Risk multiplier per grade — position size scaling.
+RISK_MULT: dict[Grade, float] = {
+    Grade.A: 1.0,
+    Grade.B: 0.75,
+    Grade.C: 0.50,
+}
+
+
+def risk_multiplier(grade: Grade) -> float:
+    """Return position-size multiplier for a given grade."""
+    return RISK_MULT.get(grade, 0.50)

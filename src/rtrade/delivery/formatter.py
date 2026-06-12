@@ -37,6 +37,8 @@ def format_signal_telegram(
     *,
     pip_size: float = 0.01,
     equity: float = 10_000.0,
+    grade: str | None = None,
+    scaled_size: float | None = None,
 ) -> str:
     """Format a TradingSignal for Telegram delivery.
 
@@ -58,17 +60,39 @@ def format_signal_telegram(
 
     risk_amount = equity * (c.risk_pct / 100)
 
+    strat_label = c.strategy.replace("_", " ").title()
     lines = [
-        f"{emoji} SINYAL {c.action.value} — {c.symbol} ({c.timeframe.value.upper()}) · {c.strategy.replace('_', ' ').title()}",
+        (
+            f"{emoji} SINYAL {c.action.value}"
+            f" \u2014 {c.symbol}"
+            f" ({c.timeframe.value.upper()})"
+            f" \u00b7 {strat_label}"
+        ),
         f"Entry (LIMIT): {_format_price(e, dec)}",
-        f"Stop Loss   : {_format_price(sl, dec)}  (−{_format_price(sl_dist, dec)} / {atr_mult:.1f}×ATR)",
+        (
+            f"Stop Loss   : {_format_price(sl, dec)}"
+            f"  (\u2212{_format_price(sl_dist, dec)}"
+            f" / {atr_mult:.1f}\u00d7ATR)"
+        ),
         f"Take Profit : {_format_price(tp, dec)}  (R:R 1:{rr:.1f})",
         f"Berlaku s/d : {c.valid_until.strftime('%Y-%m-%d %H:%M')} UTC",
-        f"Ukuran saran: {c.position_size:.4f} (risiko {c.risk_pct:.0f}% dari equity ${equity:,.0f} = ${risk_amount:,.0f})",
-        f"Confidence  : {signal.confidence:.2f}  ·  Confluence {c.confluence_score}/100",
-        "",
-        f"Alasan: {signal.rationale}",
+        (
+            f"Ukuran saran: {c.position_size:.4f}"
+            f" (risiko {c.risk_pct:.0f}%"
+            f" dari equity ${equity:,.0f}"
+            f" = ${risk_amount:,.0f})"
+        ),
+        (f"Confidence  : {signal.confidence:.2f}  \u00b7  Confluence {c.confluence_score}/100"),
     ]
+
+    if grade is not None:
+        grade_line = f"Grade       : {grade}"
+        if scaled_size is not None:
+            grade_line += f"  \u00b7  size saran {scaled_size:.4f}"
+        lines.append(grade_line)
+
+    lines.append("")
+    lines.append(f"Alasan: {signal.rationale}")
 
     if signal.key_risks:
         lines.append(f"Risiko utama: {'; '.join(signal.key_risks)}")
@@ -84,6 +108,8 @@ def format_candidate_deterministic(
     *,
     pip_size: float = 0.01,
     equity: float = 10_000.0,
+    grade: str | None = None,
+    scaled_size: float | None = None,
 ) -> str:
     """Format a candidate for Telegram in P1 (no LLM — deterministic rationale).
 
@@ -132,6 +158,8 @@ def format_candidate_deterministic(
         ),
         pip_size=pip_size,
         equity=equity,
+        grade=grade,
+        scaled_size=scaled_size,
     )
 
 

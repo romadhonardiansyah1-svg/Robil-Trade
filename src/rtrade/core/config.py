@@ -90,11 +90,13 @@ class LLMSettings(_StrictModel):
     analyst_model: str = Field(min_length=1)
     critic_model: str = Field(min_length=1)
     flagship_model: str = Field(default="gemini/gemini-2.5-pro", min_length=1)
-    verifier_model: str = Field(default="gemini/gemini-2.5-flash", min_length=1)
     temperature: float = Field(ge=0.0, le=1.0)
     max_confidence_adjust: float = Field(ge=0.0, le=LLM_CONFIDENCE_ADJUST_CAP)
     timeout_seconds: int = Field(ge=5, le=300)
     max_context_tokens: int = Field(default=4000, ge=500, le=32000)
+    escalation_low: float = Field(default=0.48, ge=0.0, le=1.0)
+    escalation_high: float = Field(default=0.63, ge=0.0, le=1.0)
+    coroner_enabled: bool = False
 
 
 class WalkForwardSettings(_StrictModel):

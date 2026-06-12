@@ -99,6 +99,8 @@ async def run_llm_pipeline(
     *,
     confidence_min: float = 0.55,
     deterministic_fallback_threshold: int = 75,
+    analyst_model: str = "gemini/gemini-3.1-flash-lite",
+    critic_model: str = "gemini/gemini-3.1-flash-lite",
 ) -> PipelineResult:
     """Run the full LLM pipeline on a signal candidate.
 
@@ -109,6 +111,8 @@ async def run_llm_pipeline(
         confidence_min: Minimum confidence for GR-09 (default 0.55).
         deterministic_fallback_threshold: If LLM fails but
             confluence >= this, publish as deterministic-only.
+        analyst_model: Model to use for the Analyst agent.
+        critic_model: Model to use for the Critic agent.
 
     Returns:
         PipelineResult with decision, confidence, and audit data.
@@ -120,10 +124,10 @@ async def run_llm_pipeline(
 
     try:
         # Step 1: Analyst.
-        assessment = await run_analyst(client, pack)
+        assessment = await run_analyst(client, pack, model=analyst_model)
 
         # Step 2: Critic.
-        review = await run_critic(client, pack, assessment)
+        review = await run_critic(client, pack, assessment, model=critic_model)
 
         # Step 3: Verifier (deterministic).
         verifier_report = verify(pack, assessment, review)

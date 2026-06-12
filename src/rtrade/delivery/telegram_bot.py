@@ -120,11 +120,11 @@ class TelegramDelivery:
             return False
         return datetime.now(UTC) < self._muted_until
 
-    async def send_signal(self, text: str) -> None:
-        """Push a signal message to the configured chat."""
+    async def send_signal(self, text: str) -> bool:
+        """Push a signal message to the configured chat. Returns True if sent."""
         if self.is_muted:
             logger.info("signal muted, skipping Telegram delivery")
-            return
+            return False
         try:
             await self._bot.send_message(
                 chat_id=self._chat_id,
@@ -132,8 +132,10 @@ class TelegramDelivery:
                 parse_mode=None,  # plain text, no markdown issues
             )
             logger.info("signal sent to Telegram")
+            return True
         except Exception as exc:
             logger.error("failed to send Telegram message", error=str(exc))
+            return False
 
     async def send_alert(self, text: str) -> None:
         """Send an alert/notification (not muted)."""

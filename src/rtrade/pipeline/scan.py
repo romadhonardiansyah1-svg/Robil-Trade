@@ -14,7 +14,7 @@ import structlog
 import yaml
 
 from rtrade.core.config import AppConfig, InstrumentConfig
-from rtrade.core.constants import Market, SignalStatus, Timeframe
+from rtrade.core.constants import AuditStage, Market, SignalStatus, Timeframe
 from rtrade.core.errors import ConfigError, ProviderError
 from rtrade.core.timeutil import ensure_utc, timeframe_duration
 from rtrade.data.base import MarketDataProvider
@@ -27,16 +27,29 @@ from rtrade.delivery.formatter import format_candidate_deterministic
 from rtrade.delivery.telegram_bot import TelegramDelivery
 from rtrade.guardrails.gate import run_gate
 from rtrade.indicators.engine import compute as compute_indicators
+from rtrade.indicators.engine import snapshot as indicator_snapshot
 from rtrade.indicators.structure import cluster_sr_levels, detect_gaps, detect_swing_points
+from rtrade.llm.cascade import should_escalate
+from rtrade.llm.client import LLMClient
+from rtrade.llm.context_pack import ContextPack, build_context_pack
+from rtrade.llm.pipeline import PipelineDecision, run_llm_pipeline
 from rtrade.papertrack.tracker import check_fill, check_outcome
 from rtrade.persistence.db import create_engine, create_session_factory
 from rtrade.persistence.models import EconomicEvent, Signal
-from rtrade.persistence.repositories import CandleRepo, EventRepo, InstrumentRepo, SignalRepo
+from rtrade.persistence.repositories import (
+    AuditRepo,
+    CandleRepo,
+    EventRepo,
+    InstrumentRepo,
+    SignalRepo,
+    StrategyStateRepo,
+)
 from rtrade.regime.rules import RegimeClassifier
-from rtrade.risk.news_filter import check_news_blackout
+from rtrade.risk.news_filter import check_news_blackout, high_impact_within
 from rtrade.signals.edge_quality import EdgeQualityConfig
 from rtrade.signals.engine import generate_candidate
-from rtrade.signals.schemas import DISCLAIMER_TEXT, TradingSignal
+from rtrade.signals.grading import grade_signal, risk_multiplier
+from rtrade.signals.schemas import DISCLAIMER_TEXT, SignalCandidate, TradingSignal
 from rtrade.strategies import STRATEGY_REGISTRY, StrategyConfig
 
 logger = structlog.get_logger(__name__)
@@ -188,11 +201,15 @@ async def run_scan(
                 regime,
                 live_price,
                 session_repo=SignalRepo(session),
+                state_repo=StrategyStateRepo(session),
+                audit_repo=AuditRepo(session),
                 now=now,
                 calendar_stale=calendar_stale,
             )
             await session.commit()
 
+        # F3: Honest delivery with mark_delivery + audit.
+        sent = False
         if (
             deliver
             and result.message
@@ -203,8 +220,12 @@ async def run_scan(
                 cfg.secrets.telegram_bot_token, cfg.secrets.telegram_chat_id
             )
             try:
-                await telegram.send_signal(result.message)
-                logger.info("telegram delivery ok", signal_id=result.signal_id)
+                sent = await telegram.send_signal(result.message)
+                logger.info(
+                    "telegram delivery",
+                    signal_id=result.signal_id,
+                    sent=sent,
+                )
             except Exception as exc:
                 logger.error(
                     "telegram delivery failed — signal still PUBLISHED",
@@ -213,6 +234,23 @@ async def run_scan(
                 )
             finally:
                 await telegram.close()
+
+        # F3: Persist delivery status.
+        if result.signal_id:
+            async with session_factory() as session:
+                await SignalRepo(session).mark_delivery(
+                    result.signal_id,
+                    sent=sent,
+                    error=None if sent else "telegram send failed",
+                    at=datetime.now(UTC),
+                )
+                await AuditRepo(session).add(
+                    stage=AuditStage.DELIVERY.value,
+                    ok=sent,
+                    signal_id=result.signal_id,
+                    detail={"sent": sent},
+                )
+                await session.commit()
 
         return result
     finally:
@@ -324,6 +362,78 @@ async def track_paper_signals(
         await engine.dispose()
 
 
+def _build_pack(
+    instrument: InstrumentConfig,
+    candidate: SignalCandidate,
+    df_1h: pd.DataFrame,
+    sr_levels: list[Any],
+    gap_zones: list[Any],
+    regime: Any,
+    event_dicts: list[dict[str, object]],
+    session_active: bool,
+) -> ContextPack:
+    """Build a context pack for the LLM pipeline (F1)."""
+    snap = indicator_snapshot(df_1h)
+    e = candidate.levels.entry_limit
+    sl = candidate.levels.stop_loss
+    tp = candidate.levels.take_profit
+    sl_dist = abs(e - sl)
+    rr = abs(tp - e) / sl_dist if sl_dist > 0 else 0.0
+    swings = detect_swing_points(df_1h.tail(200))
+    highs = [{"price": p.price, "ts": p.ts.isoformat()} for p in swings if p.is_high][-3:]
+    lows = [{"price": p.price, "ts": p.ts.isoformat()} for p in swings if not p.is_high][-3:]
+    return build_context_pack(
+        symbol=instrument.symbol,
+        market=instrument.market.value,
+        timeframe=candidate.timeframe,
+        session_active=session_active,
+        action=candidate.action.value,
+        entry=e,
+        sl=sl,
+        tp=tp,
+        rr=rr,
+        valid_until=candidate.valid_until.isoformat(),
+        strategy=candidate.strategy,
+        confluence_breakdown=candidate.confluence_breakdown.model_dump(),
+        snapshot=snap,
+        swing_highs=highs,
+        swing_lows=lows,
+        sr_levels=[
+            {
+                "price": lv.price,
+                "strength": lv.strength,
+                "is_resistance": lv.is_resistance,
+            }
+            for lv in sr_levels
+        ],
+        gap_zones=[{"high": g.high, "low": g.low, "direction": g.direction} for g in gap_zones],
+        regime_state=regime.regime.value,
+        regime_since=regime.since.isoformat(),
+        calendar_events=[
+            {
+                **ev,
+                "event_time": (
+                    ev["event_time"].isoformat()
+                    if hasattr(ev["event_time"], "isoformat")
+                    else ev["event_time"]
+                ),
+            }
+            for ev in event_dicts
+        ],
+        derivatives=None,
+        df_1h=df_1h,
+    )
+
+
+def _status_for_decision(decision: PipelineDecision) -> SignalStatus:
+    """Map pipeline decision to signal status (pure, unit-tested)."""
+    if decision in (PipelineDecision.PUBLISH, PipelineDecision.FALLBACK):
+        return SignalStatus.PUBLISHED
+    if decision == PipelineDecision.REJECTED:
+        return SignalStatus.REJECTED
+    return SignalStatus.ABSTAINED
+
+
 async def _run_strategies(
     cfg: AppConfig,
     instrument: InstrumentConfig,
@@ -338,6 +448,8 @@ async def _run_strategies(
     live_price: float | None,
     *,
     session_repo: SignalRepo,
+    state_repo: StrategyStateRepo,
+    audit_repo: AuditRepo,
     now: datetime,
     calendar_stale: bool = False,
 ) -> ScanResult:
@@ -346,9 +458,22 @@ async def _run_strategies(
         if strategy.required_regime != regime.regime:
             continue
 
+        # F2: Strategy state check.
+        if not await state_repo.is_enabled(strategy_name):
+            logger.info("strategy disabled, skipping", strategy=strategy_name)
+            continue
+
         strategy_cfg = _load_strategy_config(strategy_name)
         valid_bars = strategy_cfg.get_int("levels.valid_bars", 6)
         edge_cfg = _edge_quality_config(cfg)
+
+        # F2: S2 hard-block — skip strategy if high-impact event within hours.
+        hard_block_h = strategy_cfg.get_int("news.hard_block_hours", 0)
+        if hard_block_h > 0 and high_impact_within(
+            event_dicts, instrument.related_currencies, now, hours=hard_block_h
+        ):
+            logger.info("news hard-block, skipping strategy", strategy=strategy_name)
+            continue
 
         candidate = generate_candidate(
             strategy,
@@ -358,7 +483,9 @@ async def _run_strategies(
             df_4h,
             sr_levels,
             gap_zones,
-            has_high_impact_event=in_news_blackout,
+            has_high_impact_event=high_impact_within(
+                event_dicts, instrument.related_currencies, now, hours=12
+            ),
             session_active=_session_active(instrument, now),
             funding_extreme=False,
             risk_pct=cfg.settings.risk.risk_per_trade_pct,
@@ -372,6 +499,18 @@ async def _run_strategies(
         )
         if candidate is None:
             continue
+
+        # F2: Audit candidate.
+        await audit_repo.add(
+            stage=AuditStage.CANDIDATE.value,
+            ok=True,
+            signal_id=candidate.candidate_id,
+            detail={
+                "symbol": instrument.symbol,
+                "strategy": candidate.strategy,
+                "confluence": candidate.confluence_score,
+            },
+        )
 
         duplicate = await session_repo.get_by_dedup(
             instrument_id=instrument_id,
@@ -418,7 +557,22 @@ async def _run_strategies(
             expectancy_window=cfg.settings.risk.expectancy_guard_window,
         )
 
+        # F2: Audit gate.
+        await audit_repo.add(
+            stage=AuditStage.GATE.value,
+            ok=gate.passed,
+            signal_id=candidate.candidate_id,
+            detail={"failures": [f"{f.gate_id}: {f.reason}" for f in gate.failures]},
+        )
+
         if not gate.passed:
+            # F2: GR-13 auto-disable strategy.
+            if any(f.gate_id == "GR-13" for f in gate.failures):
+                await state_repo.set_state(
+                    candidate.strategy,
+                    enabled=False,
+                    reason="GR-13 negative expectancy",
+                )
             await session_repo.add(
                 _signal_model(
                     candidate,
@@ -445,35 +599,92 @@ async def _run_strategies(
         sources: list[str] = ["deterministic_pipeline"]
         llm_used = False
 
-        # --- T16: LLM pipeline (when enabled) ---
+        # --- LLM pipeline: Analyst → Critic → Verifier (F1) ---
         if cfg.settings.llm.enabled:
-            try:
-                from rtrade.llm.client import LLMClient
-
-                llm_client = LLMClient(
-                    api_key=cfg.secrets.gemini_api_key_1,
-                    timeout=cfg.settings.llm.timeout_seconds,
+            pack = _build_pack(
+                instrument,
+                candidate,
+                df_1h,
+                sr_levels,
+                gap_zones,
+                regime,
+                event_dicts,
+                _session_active(instrument, now),
+            )
+            client = LLMClient(
+                api_key=cfg.secrets.gemini_api_key_1,
+                timeout=cfg.settings.llm.timeout_seconds,
+                temperature=cfg.settings.llm.temperature,
+            )
+            pres = await run_llm_pipeline(
+                candidate,
+                pack,
+                client,
+                confidence_min=cfg.settings.signal.confidence_min,
+                analyst_model=cfg.settings.llm.analyst_model,
+                critic_model=cfg.settings.llm.critic_model,
+            )
+            # F5: Cascade escalation on doubt band.
+            if should_escalate(
+                pres,
+                low=cfg.settings.llm.escalation_low,
+                high=cfg.settings.llm.escalation_high,
+                flagship_model=cfg.settings.llm.flagship_model,
+            ):
+                logger.info("escalating to flagship", confidence=pres.confidence)
+                pres = await run_llm_pipeline(
+                    candidate,
+                    pack,
+                    client,
+                    confidence_min=cfg.settings.signal.confidence_min,
+                    analyst_model=cfg.settings.llm.flagship_model,
+                    critic_model=cfg.settings.llm.flagship_model,
                 )
-                analyst_result = await llm_client.complete(
-                    model=cfg.settings.llm.analyst_model,
-                    system_prompt="You are a professional trading analyst.",
-                    user_prompt=format_candidate_deterministic(
-                        candidate, pip_size=instrument.pip_size
-                    ),
+            status = _status_for_decision(pres.decision)
+            if status != SignalStatus.PUBLISHED:
+                await session_repo.add(
+                    _signal_model(
+                        candidate,
+                        instrument_id,
+                        status=status,
+                        confidence=Decimal(str(pres.confidence)),
+                        payload={
+                            "candidate": candidate.model_dump(mode="json"),
+                            "llm": {
+                                "decision": pres.decision.value,
+                                "rationale": pres.rationale,
+                                "key_risks": pres.key_risks,
+                                "latency_ms": pres.pipeline_latency_ms,
+                            },
+                        },
+                    )
                 )
-                rationale = analyst_result.content
-                sources = ["llm_analyst", "deterministic_pipeline"]
-                llm_used = True
-                logger.info(
-                    "llm analyst completed",
+                return ScanResult(
+                    symbol=instrument.symbol,
+                    timeframe=candidate.timeframe.value,
+                    status=("rejected_llm" if status == SignalStatus.REJECTED else "abstained"),
                     signal_id=candidate.candidate_id,
-                    tokens=analyst_result.total_tokens,
+                    detail={
+                        "decision": pres.decision.value,
+                        "confidence": pres.confidence,
+                    },
                 )
-            except Exception as exc:
-                logger.warning(
-                    "llm pipeline failed — falling back to deterministic",
-                    error=str(exc),
-                )
+            confidence = Decimal(str(pres.confidence))
+            rationale = pres.rationale
+            key_risks = pres.key_risks or key_risks
+            sources = pres.sources or ["deterministic_pipeline"]
+            llm_used = pres.llm_used
+
+        # F4: Signal grading.
+        grade_res = grade_signal(
+            confluence_score=candidate.confluence_score,
+            regime_match=True,
+            edge_quality_score=None,
+            has_high_impact_event=high_impact_within(
+                event_dicts, instrument.related_currencies, now, hours=12
+            ),
+            confidence=float(confidence),
+        )
 
         signal = TradingSignal(
             signal_id=candidate.candidate_id,
@@ -486,13 +697,20 @@ async def _run_strategies(
             disclaimer=DISCLAIMER_TEXT,
             published_at=now,
         )
+        payload = signal.model_dump(mode="json")
+        payload["grade"] = {
+            "grade": grade_res.grade.value,
+            "reasons": grade_res.reasons,
+            "risk_mult": risk_multiplier(grade_res.grade),
+            "scaled_size": round(candidate.position_size * risk_multiplier(grade_res.grade), 4),
+        }
         await session_repo.add(
             _signal_model(
                 candidate,
                 instrument_id,
                 status=SignalStatus.PUBLISHED,
                 confidence=confidence,
-                payload=signal.model_dump(mode="json"),
+                payload=payload,
                 published_at=now,
             )
         )
@@ -502,9 +720,17 @@ async def _run_strategies(
             status="published",
             signal_id=candidate.candidate_id,
             message=format_candidate_deterministic(
-                candidate, pip_size=instrument.pip_size, equity=cfg.settings.risk.equity_usd
+                candidate,
+                pip_size=instrument.pip_size,
+                equity=cfg.settings.risk.equity_usd,
+                grade=grade_res.grade.value,
+                scaled_size=payload["grade"]["scaled_size"],
             ),
-            detail={"confluence": candidate.confluence_score, "regime": regime.regime.value},
+            detail={
+                "confluence": candidate.confluence_score,
+                "regime": regime.regime.value,
+                "grade": grade_res.grade.value,
+            },
         )
 
     return ScanResult(

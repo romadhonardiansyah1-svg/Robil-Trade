@@ -17,6 +17,7 @@ from typing import Any
 import pandas as pd
 
 from rtrade.backtest.costs import CostModel, compute_trade_cost
+from rtrade.backtest.smart_exit import ExitState, SmartExitConfig, apply_smart_exit
 
 
 @dataclass
@@ -70,6 +71,7 @@ def run_backtest(
     initial_equity: float = 10_000.0,
     risk_pct: float = 1.0,
     cost_model: CostModel | None = None,
+    smart_exit: SmartExitConfig | None = None,
 ) -> BacktestResult:
     """Run event-loop backtest on a DataFrame with pre-computed signals.
 
@@ -80,6 +82,7 @@ def run_backtest(
         initial_equity: Starting equity.
         risk_pct: Risk per trade as percentage.
         cost_model: Transaction cost model (spread, commission, slippage).
+        smart_exit: If provided, use smart exit logic (partial TP, BE, trail).
 
     Returns:
         BacktestResult with trade log and equity curve.
@@ -136,35 +139,67 @@ def run_backtest(
             continue
 
         # Phase 2: After fill, check SL/TP on subsequent bars.
-        for i in range(trade.fill_bar, n_bars):  # type: ignore[arg-type]
-            if i == trade.fill_bar:
-                # Don't exit on the fill bar itself (conservative).
-                continue
+        # If smart_exit is configured, use apply_smart_exit per bar.
+        if smart_exit is not None:
+            atr_col = df["atr"].astype(float).values if "atr" in df.columns else None
+            exit_state = ExitState(
+                current_sl=trade.stop_loss,
+            )
+            for i in range(trade.fill_bar + 1, n_bars):  # type: ignore[operator]
+                atr_val = (
+                    float(atr_col[i])
+                    if atr_col is not None
+                    else abs(trade.fill_price - trade.stop_loss)
+                )  # type: ignore[index]
+                exit_state, exit_reason = apply_smart_exit(
+                    exit_state,
+                    smart_exit,
+                    direction=trade.direction,
+                    entry=trade.fill_price,  # type: ignore[arg-type]
+                    original_sl=trade.stop_loss,
+                    take_profit=trade.take_profit,
+                    bar_high=highs[i],
+                    bar_low=lows[i],
+                    atr=atr_val,
+                )
+                if exit_reason is not None:
+                    trade.exit_bar = i
+                    if exit_reason == "SL":
+                        trade.exit_price = exit_state.current_sl
+                    else:
+                        trade.exit_price = trade.take_profit
+                    trade.exit_reason = exit_reason
+                    break
+        else:
+            for i in range(trade.fill_bar, n_bars):  # type: ignore[arg-type]
+                if i == trade.fill_bar:
+                    # Don't exit on the fill bar itself (conservative).
+                    continue
 
-            bar_high = highs[i]
-            bar_low = lows[i]
+                bar_high = highs[i]
+                bar_low = lows[i]
 
-            sl_hit = False
-            tp_hit = False
+                sl_hit = False
+                tp_hit = False
 
-            if trade.direction == "BUY":
-                sl_hit = bar_low <= trade.stop_loss
-                tp_hit = bar_high >= trade.take_profit
-            else:  # SELL
-                sl_hit = bar_high >= trade.stop_loss
-                tp_hit = bar_low <= trade.take_profit
+                if trade.direction == "BUY":
+                    sl_hit = bar_low <= trade.stop_loss
+                    tp_hit = bar_high >= trade.take_profit
+                else:  # SELL
+                    sl_hit = bar_high >= trade.stop_loss
+                    tp_hit = bar_low <= trade.take_profit
 
-            # If BOTH hit in same bar → SL first (worst-case assumption).
-            if (sl_hit and tp_hit) or sl_hit:
-                trade.exit_bar = i
-                trade.exit_price = trade.stop_loss
-                trade.exit_reason = "SL"
-                break
-            elif tp_hit:
-                trade.exit_bar = i
-                trade.exit_price = trade.take_profit
-                trade.exit_reason = "TP"
-                break
+                # If BOTH hit in same bar → SL first (worst-case assumption).
+                if (sl_hit and tp_hit) or sl_hit:
+                    trade.exit_bar = i
+                    trade.exit_price = trade.stop_loss
+                    trade.exit_reason = "SL"
+                    break
+                elif tp_hit:
+                    trade.exit_bar = i
+                    trade.exit_price = trade.take_profit
+                    trade.exit_reason = "TP"
+                    break
 
         # If still no exit (data ended), mark as open.
         if trade.exit_reason is None:

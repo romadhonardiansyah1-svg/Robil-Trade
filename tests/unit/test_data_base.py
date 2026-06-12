@@ -54,7 +54,7 @@ class TestCandle:
             )
 
     def test_negative_volume_rejected(self) -> None:
-        with pytest.raises(ValueError, match="negative volume"):
+        with pytest.raises(ValueError, match="volume invalid"):
             Candle(
                 symbol="XAUUSD",
                 timeframe=Timeframe.H1,

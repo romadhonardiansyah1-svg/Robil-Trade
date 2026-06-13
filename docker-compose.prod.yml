@@ -46,6 +46,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RTRADE_TOKEN_DIR: /app/data/auth/tokens
       RTRADE_ADC_DIR: /app/data/auth/adc
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     volumes:
       - ./reports:/app/reports
       - ./data:/app/data
@@ -91,6 +92,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RTRADE_TOKEN_DIR: /app/data/auth/tokens
       RTRADE_ADC_DIR: /app/data/auth/adc
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     command: ["python", "-m", "uvicorn", "rtrade.delivery.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     networks:
       - internal
@@ -133,6 +135,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       RTRADE_TOKEN_DIR: /app/data/auth/tokens
       RTRADE_ADC_DIR: /app/data/auth/adc
+      NUMBA_CACHE_DIR: /tmp/numba_cache
     command: ["python", "-m", "rtrade.cli.bot"]
     networks:
       - internal

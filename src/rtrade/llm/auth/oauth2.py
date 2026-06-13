@@ -118,13 +118,19 @@ class OAuth2Provider(CredentialProvider):
             init.raise_for_status()
             d = init.json()
             verification = (
-                d.get("verification_uri_complete")
-                or d.get("verification_url")
+                d.get("verification_url")
                 or d.get("verification_uri")
+                or d.get("verification_uri_complete")
             )
-            user_code = d["user_code"]
+            user_code = d.get("user_code")
+            device_code = d.get("device_code")
+            if not device_code:
+                raise RuntimeError(
+                    f"{self.provider_id}: respons device-init tidak punya 'device_code' "
+                    f"(field tersedia: {sorted(d.keys())}). Endpoint mungkin bukan RFC 8628."
+                )
+            logger.info("buka URL ini & masukkan kode", url=verification, code=user_code)
             interval = float(d.get("interval", 5))
-            device_code = d["device_code"]
 
             # Hermes-style display
             print(f"\n{'=' * 60}")  # noqa: T201

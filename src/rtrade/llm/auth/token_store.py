@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import asdict, dataclass
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from cryptography.fernet import Fernet
 
 logger = structlog.get_logger(__name__)
+
+_ACCOUNT_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +48,29 @@ def _fernet() -> Fernet | None:
     from cryptography.fernet import Fernet
 
     return Fernet(key.encode())
+
+
+def account_store_id(provider: str, account: str = "default") -> str:
+    """Store id kanonik untuk (provider, akun). Akun 'default' = file lama tanpa suffix."""
+    if not _ACCOUNT_RE.match(account):
+        raise ValueError(
+            f"nama akun tidak valid: {account!r} (huruf kecil/angka/underscore, maks 32)"
+        )
+    if account == "default":
+        return provider
+    return f"{provider}__{account}"
+
+
+def list_accounts(provider: str) -> list[str]:
+    """Daftar akun yang punya token tersimpan untuk satu provider."""
+    accounts: list[str] = []
+    token_dir = _token_dir()
+    if (token_dir / f"{provider}.json").exists():
+        accounts.append("default")
+    prefix = f"{provider}__"
+    for path in sorted(token_dir.glob(f"{prefix}*.json")):
+        accounts.append(path.stem[len(prefix) :])
+    return accounts
 
 
 def save_token(provider: str, token: StoredToken) -> None:

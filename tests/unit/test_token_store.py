@@ -91,3 +91,35 @@ class TestDeleteToken:
     @pytest.mark.usefixtures("_token_env")
     def test_delete_nonexistent(self) -> None:
         assert delete_token("nonexistent") is False
+
+
+class TestMultiAccountHelpers:
+    """A2: token store multi-account helpers."""
+
+    def test_account_store_id_default_and_named(self) -> None:
+        from rtrade.llm.auth.token_store import account_store_id
+
+        assert account_store_id("generic_gateway") == "generic_gateway"
+        assert account_store_id("generic_gateway", "default") == "generic_gateway"
+        assert account_store_id("generic_gateway", "acc2") == "generic_gateway__acc2"
+
+    def test_account_store_id_rejects_path_tricks(self) -> None:
+        from rtrade.llm.auth.token_store import account_store_id
+
+        for bad in ("../evil", "a b", "UPPER", "x" * 33, ""):
+            with pytest.raises(ValueError):
+                account_store_id("p", bad)
+
+    @pytest.mark.usefixtures("_token_env")
+    def test_list_accounts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("RTRADE_TOKEN_KEY", raising=False)
+        from rtrade.llm.auth.token_store import list_accounts
+
+        tok = StoredToken(access_token="a", refresh_token=None, expiry_epoch=1.0, scopes=[])
+        save_token("gw", tok)
+        save_token("gw__kerja", tok)
+        save_token("gw__pribadi", tok)
+        save_token("lain__x", tok)
+        assert list_accounts("gw") == ["default", "kerja", "pribadi"]
+        assert list_accounts("lain") == ["x"]
+        assert list_accounts("kosong") == []

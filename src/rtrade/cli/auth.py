@@ -72,9 +72,15 @@ def _google_login(flow_override: str | None = None, account: str = "default") ->
     if account == "default":
         from pathlib import Path
 
-        adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
-        adc.parent.mkdir(parents=True, exist_ok=True)
-        adc.write_text(payload, encoding="utf-8")
+        try:
+            adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+            adc.parent.mkdir(parents=True, exist_ok=True)
+            adc.write_text(payload, encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "lewati tulis ADC well-known (FS read-only?) — pakai RTRADE_ADC_DIR",
+                error=str(exc),
+            )
     logger.info("google login sukses — ADC tersimpan", account=account, path=str(per_account))
 
 
@@ -108,6 +114,13 @@ def _cmd_login(args: argparse.Namespace) -> None:
                 f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
             )
             sys.exit(1)
+        if profile.auth_mode == "external_command":
+            print(  # noqa: T201
+                f"Provider '{args.provider}' memakai auth_mode=external_command yang belum "
+                "didukung jalur login bawaan. Gunakan provider API key / OAuth gateway, "
+                "atau sediakan adapter eksternal sesuai docs/AUTH_OAUTH.md."
+            )
+            sys.exit(1)
         # Build store_id = provider__account
         sid = account_store_id(args.provider, account)
         provider = build_provider_from_profile(args.provider, store_id=sid)
@@ -130,20 +143,23 @@ def _cmd_providers(_args: argparse.Namespace) -> None:
 
 
 def _cmd_status(args: argparse.Namespace) -> None:
-    from rtrade.llm.auth.token_store import load_token
+    from rtrade.llm.auth.token_store import account_store_id, list_accounts, load_token
 
     providers = [args.provider] if args.provider else _all_provider_ids()
     for pid in providers:
-        tok = load_token(pid)
-        if tok is None:
-            print(f"{pid}: not_logged_in")  # noqa: T201
-        else:
-            import datetime
+        accs = list_accounts(pid) or ["default"]
+        for acc in accs:
+            tok = load_token(account_store_id(pid, acc))
+            label = f"{pid}[{acc}]"
+            if tok is None:
+                print(f"{label}: not_logged_in")  # noqa: T201
+            else:
+                import datetime
 
-            exp = datetime.datetime.fromtimestamp(tok.expiry_epoch, tz=datetime.UTC)
-            print(  # noqa: T201
-                f"{pid}: logged_in, expires={exp.isoformat()}, scopes={tok.scopes}"
-            )
+                exp = datetime.datetime.fromtimestamp(tok.expiry_epoch, tz=datetime.UTC)
+                print(  # noqa: T201
+                    f"{label}: logged_in, expires={exp.isoformat()}, scopes={tok.scopes}"
+                )
 
 
 def _cmd_logout(args: argparse.Namespace) -> None:
@@ -264,6 +280,28 @@ def _cmd_use(args: argparse.Namespace) -> None:
 
     llm = doc.setdefault("llm", {})
     routes = llm.setdefault("model_routes", {})
+    profiles_cfg = llm.setdefault("auth_profiles", {})
+
+    # Buat/lengkapi entri auth_profiles supaya route TIDAK menggantung (C4).
+    entry: dict[str, object] = {"enabled": True}
+    if profile.auth_mode == "vertex":
+        entry["auth_type"] = "vertex"
+        entry["vertex_project"] = llm.get("vertex_project", "")
+    elif profile.auth_mode == "api_key":
+        entry["auth_type"] = "api_key"
+        # api_key_secret kosong → pool pakai key dari Secrets family (lihat pool_builder).
+    else:
+        # oauth2 / external_command / subscription → kredensial token store via CLI login.
+        entry["auth_type"] = "cli_oauth"
+        entry["provider_id"] = args.provider
+        entry["account"] = getattr(args, "account", "default")
+    # Jangan timpa kunci lain yang mungkin sudah diisi operator manual.
+    existing = profiles_cfg.get(auth_profile_name)
+    if isinstance(existing, dict):
+        existing.update(entry)
+    else:
+        profiles_cfg[auth_profile_name] = entry
+
     routes[args.role] = {
         "model": args.model,
         "auth_profile": auth_profile_name,
@@ -343,6 +381,7 @@ def main() -> None:
     use.add_argument("--provider", required=True)
     use.add_argument("--model", required=True)
     use.add_argument("--force", action="store_true", help="Skip model catalog validation")
+    use.add_argument("--account", default="default", help="Akun OAuth (untuk auth_type cli_oauth)")
 
     accounts = sub.add_parser("accounts", help="List akun tersimpan per provider")
     accounts.add_argument("--provider", required=True)

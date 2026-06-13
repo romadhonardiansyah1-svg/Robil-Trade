@@ -209,16 +209,16 @@ class OAuth2Provider(CredentialProvider):
                 # Must exchange for access_token
                 if "authorization_code" in body:
                     logger.info("exchanging authorization_code for access_token")
+                    # Codex token exchange: form-urlencoded, NOT JSON
                     token_resp = await client.post(
                         "https://auth.openai.com/oauth/token",
-                        json={
+                        data={
                             "grant_type": "authorization_code",
+                            "client_id": self.client_id,
                             "code": body["authorization_code"],
                             "code_verifier": body.get("code_verifier", ""),
-                            "code_challenge": body.get("code_challenge", ""),
-                            "client_id": self.client_id,
+                            "redirect_uri": "https://auth.openai.com/deviceauth/callback",
                         },
-                        headers={"Content-Type": "application/json"},
                     )
                     token_body = token_resp.json()
                     logger.info(
@@ -226,11 +226,7 @@ class OAuth2Provider(CredentialProvider):
                         body=token_body,
                         status=token_resp.status_code,
                     )
-                    final_token = (
-                        token_body.get("access_token")
-                        or token_body.get("session_token")
-                        or token_body.get("token")
-                    )
+                    final_token = token_body.get("access_token")
                     if final_token:
                         tok = StoredToken(
                             final_token,

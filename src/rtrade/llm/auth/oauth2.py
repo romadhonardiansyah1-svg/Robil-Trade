@@ -215,15 +215,15 @@ class OAuth2Provider(CredentialProvider):
                             "grant_type": "authorization_code",
                             "code": body["authorization_code"],
                             "code_verifier": body.get("code_verifier", ""),
+                            "code_challenge": body.get("code_challenge", ""),
                             "client_id": self.client_id,
-                            "redirect_uri": "https://platform.openai.com/codex",
                         },
                         headers={"Content-Type": "application/json"},
                     )
                     token_body = token_resp.json()
                     logger.info(
                         "token exchange response",
-                        keys=sorted(token_body.keys()),
+                        body=token_body,
                         status=token_resp.status_code,
                     )
                     final_token = (

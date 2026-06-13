@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from freezegun import freeze_time
+import pytest
 
 from rtrade.core.config import InstrumentConfig
 from rtrade.core.constants import Market, Timeframe

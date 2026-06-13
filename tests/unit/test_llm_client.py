@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from pydantic import BaseModel, Field
+import pytest
 
 from rtrade.core.errors import LLMOutputError, LLMUnavailableError
 from rtrade.llm.client import LLMClient, _validate_json

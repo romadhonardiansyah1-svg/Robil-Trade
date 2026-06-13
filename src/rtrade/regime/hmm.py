@@ -18,12 +18,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from hmmlearn.hmm import GaussianHMM
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-import structlog
-from hmmlearn.hmm import GaussianHMM
 from sklearn.preprocessing import StandardScaler
+import structlog
 
 from rtrade.core.constants import Regime
 

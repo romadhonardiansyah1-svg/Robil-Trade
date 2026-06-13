@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import structlog
 from pydantic import BaseModel, field_validator
+import structlog
 
 from rtrade.llm.client import LLMClient
 

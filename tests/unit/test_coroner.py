@@ -1,7 +1,7 @@
 """T30: Tests for LLM Coroner."""
 
-import pytest
 from pydantic import ValidationError
+import pytest
 
 from rtrade.llm.coroner import FAILURE_MODES, CoronerReport
 

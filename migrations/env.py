@@ -1,8 +1,8 @@
 """Alembic environment — async engine (asyncpg), URL from DATABASE_URL env var."""
 
 import asyncio
-import os
 from logging.config import fileConfig
+import os
 
 from alembic import context
 from sqlalchemy import pool

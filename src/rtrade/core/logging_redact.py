@@ -5,8 +5,8 @@ Melindungi dari kebocoran API key/token/secret ke log, baik di key maupun di val
 
 from __future__ import annotations
 
-import re
 from collections.abc import MutableMapping
+import re
 from typing import Any
 
 _SENSITIVE_KEYS = re.compile(

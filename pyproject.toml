@@ -88,6 +88,10 @@ ignore = [
     "B018",     # useless attribute access — intentional assertion in backtest
 ]
 
+[tool.ruff.lint.isort]
+known-first-party = ["rtrade"]
+force-sort-within-sections = true
+
 [tool.ruff.lint.per-file-ignores]
 "migrations/versions/*" = ["E501"]
 

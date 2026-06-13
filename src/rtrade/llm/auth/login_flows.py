@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 from enum import StrEnum
+import os
 
 
 class LoginFlow(StrEnum):

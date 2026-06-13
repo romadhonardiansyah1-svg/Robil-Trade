@@ -21,8 +21,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import structlog
 from sklearn.model_selection import TimeSeriesSplit
+import structlog
 
 logger = structlog.get_logger(__name__)
 
@@ -171,7 +171,6 @@ class MetaLabeler:
         Returns:
             MetaLabelEvaluation with accuracy metrics.
         """
-        import xgboost as xgb
         from sklearn.metrics import (
             accuracy_score,
             f1_score,
@@ -179,6 +178,7 @@ class MetaLabeler:
             recall_score,
             roc_auc_score,
         )
+        import xgboost as xgb
 
         X = df[self.FEATURE_COLUMNS].values
         y = df["label"].values

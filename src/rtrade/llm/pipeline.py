@@ -13,9 +13,9 @@ Timeout: 45s total pipeline. On failure/timeout:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from enum import StrEnum
+import time
 
 import structlog
 

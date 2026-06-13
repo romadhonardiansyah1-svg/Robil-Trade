@@ -10,10 +10,10 @@ from __future__ import annotations
 import asyncio
 import signal
 
-import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 from apscheduler.triggers.cron import CronTrigger  # type: ignore[import-untyped]
 from apscheduler.triggers.interval import IntervalTrigger  # type: ignore[import-untyped]
+import structlog
 
 from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Timeframe

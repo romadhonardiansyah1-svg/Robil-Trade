@@ -11,17 +11,17 @@ Wraps litellm.acompletion() with:
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import time
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from rtrade.llm.auth.base import CredentialProvider
 
 import litellm
-import structlog
 from pydantic import BaseModel
+import structlog
 
 from rtrade.core.errors import LLMOutputError, LLMUnavailableError
 from rtrade.llm.auth.pool import (

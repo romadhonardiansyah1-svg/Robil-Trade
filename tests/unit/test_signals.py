@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime
 
-import pytest
 from pydantic import ValidationError
+import pytest
 
 from rtrade.core.constants import Action, Timeframe
 from rtrade.signals.levels import round_to_tick, validate_and_round_levels

@@ -2,8 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
 from pydantic import ValidationError
+import pytest
 
 from rtrade.core.constants import Action, Regime, Timeframe
 from rtrade.signals.schemas import ConfluenceBreakdown, LevelSet, SignalCandidate

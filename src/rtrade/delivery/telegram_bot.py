@@ -15,10 +15,10 @@ from __future__ import annotations
 import contextlib
 from datetime import UTC, datetime
 
-import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
+import structlog
 
 logger = structlog.get_logger(__name__)
 

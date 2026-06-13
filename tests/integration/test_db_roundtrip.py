@@ -3,14 +3,14 @@
 Auto-skips when the dev stack is not running (`docker compose up -d` first).
 """
 
+from datetime import UTC, datetime
+from decimal import Decimal
 import os
+from pathlib import Path
 import socket
 import subprocess
 import sys
 import uuid
-from datetime import UTC, datetime
-from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from sqlalchemy import delete, text

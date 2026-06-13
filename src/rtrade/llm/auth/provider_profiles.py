@@ -6,8 +6,8 @@ A0: Codex OAuth + xAI OAuth = subscription_oauth (Hermes-style, masuk pool).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 
 import yaml

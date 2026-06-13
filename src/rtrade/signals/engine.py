@@ -10,8 +10,8 @@ In P2+, it would be passed to the LLM pipeline first.
 
 from __future__ import annotations
 
-import uuid
 from datetime import UTC, datetime
+import uuid
 
 import pandas as pd
 import structlog

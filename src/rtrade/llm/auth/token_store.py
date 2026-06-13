@@ -7,13 +7,13 @@ Jika RTRADE_TOKEN_KEY kosong: simpan plaintext TAPI log peringatan keras + chmod
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 import json
 import os
+from pathlib import Path
 import re
 import stat
 import sys
-from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog

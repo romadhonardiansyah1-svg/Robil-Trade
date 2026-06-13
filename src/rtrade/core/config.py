@@ -14,9 +14,9 @@ silently ignored.
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+import yaml
 
 from rtrade.core.constants import Market, Timeframe
 from rtrade.core.errors import ConfigError

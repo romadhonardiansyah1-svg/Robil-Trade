@@ -9,9 +9,9 @@ P2 belum pakai RAG berita; kalender ekonomi + data terstruktur dulu.
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 from typing import Any
 
 import pandas as pd

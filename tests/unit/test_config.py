@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-import pytest
 from pydantic import ValidationError
+import pytest
 
 from rtrade.core.config import (
     AppConfig,

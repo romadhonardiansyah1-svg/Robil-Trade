@@ -11,9 +11,9 @@ Probability of Backtest Overfitting (PBO via CSCV, Bailey et al. 2017):
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from itertools import combinations
+import math
 
 import numpy as np
 from scipy import stats  # type: ignore[import-untyped]

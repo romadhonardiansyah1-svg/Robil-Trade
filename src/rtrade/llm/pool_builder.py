@@ -135,6 +135,25 @@ def build_scan_pool(
                 )
             )
 
+    # --- 3b. Scan token store for known OAuth providers (auto-discover from login) ---
+    _KNOWN_OAUTH_PROVIDERS = {
+        "codex_oauth": "openai",
+        "xai_oauth": "xai",
+    }
+    for pid, flavor in _KNOWN_OAUTH_PROVIDERS.items():
+        for acc in list_accounts(pid):
+            store = account_store_id(pid, acc)
+            if store in seen_stores:
+                continue
+            seen_stores.add(store)
+            add(
+                PooledCredential(
+                    cred_id=f"{pid}__{acc}",
+                    flavor=flavor,
+                    credential=CliOAuthProvider(provider_id=pid, token_store_id=store),
+                )
+            )
+
     # --- 4. Akun ADC Vertex (multi-akun Google) ---
     if cfg.settings.llm.vertex_project:
         from rtrade.llm.auth.vertex import VertexProvider, adc_path_for, list_adc_accounts

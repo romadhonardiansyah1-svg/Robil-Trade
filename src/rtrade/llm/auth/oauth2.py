@@ -190,7 +190,7 @@ class OAuth2Provider(CredentialProvider):
                 # Log response for debugging
                 logger.info("poll response", keys=sorted(body.keys()), status=poll.status_code)
 
-                # Check for token — Codex may use different field names
+                # Check for direct token response (RFC 8628)
                 access_token = (
                     body.get("access_token") or body.get("session_token") or body.get("token")
                 )
@@ -204,10 +204,48 @@ class OAuth2Provider(CredentialProvider):
                     save_token(self._sid, tok)
                     logger.info("device code login berhasil", provider=self._sid)
                     return tok
+
+                # Codex 2-step: returns authorization_code + code_verifier
+                # Must exchange for access_token
+                if "authorization_code" in body:
+                    logger.info("exchanging authorization_code for access_token")
+                    token_resp = await client.post(
+                        "https://auth.openai.com/oauth/token",
+                        json={
+                            "grant_type": "authorization_code",
+                            "code": body["authorization_code"],
+                            "code_verifier": body.get("code_verifier", ""),
+                            "client_id": self.client_id,
+                            "redirect_uri": "https://platform.openai.com/codex",
+                        },
+                        headers={"Content-Type": "application/json"},
+                    )
+                    token_body = token_resp.json()
+                    logger.info(
+                        "token exchange response",
+                        keys=sorted(token_body.keys()),
+                        status=token_resp.status_code,
+                    )
+                    final_token = (
+                        token_body.get("access_token")
+                        or token_body.get("session_token")
+                        or token_body.get("token")
+                    )
+                    if final_token:
+                        tok = StoredToken(
+                            final_token,
+                            token_body.get("refresh_token"),
+                            time.time() + float(token_body.get("expires_in", 3600)),
+                            self.scopes,
+                        )
+                        save_token(self._sid, tok)
+                        logger.info("device code login berhasil", provider=self._sid)
+                        return tok
+                    raise RuntimeError(f"token exchange gagal: {token_body}")
+
                 error = body.get("error", "")
 
-                # Codex returns nested error: {"error": {"code": "deviceauth_authorization_pending"}}
-                # RFC 8628 returns flat: {"error": "authorization_pending"}
+                # Codex returns nested error
                 if isinstance(error, dict):
                     error_code = error.get("code", "")
                     if error_code == "deviceauth_authorization_pending":

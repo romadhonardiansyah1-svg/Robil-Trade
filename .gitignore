@@ -21,7 +21,8 @@ htmlcov/
 .coverage*
 
 # Data & local artifacts
-data/
+/data/
+!src/rtrade/data/
 *.sqlite
 *.sqlite3
 

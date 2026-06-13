@@ -50,6 +50,12 @@ llm:
   escalation_low: 0.48            # F5: doubt band lower
   escalation_high: 0.63           # F5: doubt band upper
   coroner_enabled: false          # T30: post-mortem SL analysis
+  # --- Credential pool (A6-A9) ---
+  # Pool fallback dibangun OTOMATIS dari semua kredensial yang ada, urutan:
+  #   1) API key family model analyst (slot 1..N), 2) API key family lain,
+  #   3) akun OAuth CLI tersimpan (auth_profiles cli_oauth), 4) akun ADC Vertex.
+  # Kena 429/auth error → kredensial cooldown 60s → otomatis pindah ke berikutnya.
+  # Multi-akun OAuth: python -m rtrade.cli.auth login --provider <id> --account <label>
 
 backtest:
   min_trades_for_validation: 100

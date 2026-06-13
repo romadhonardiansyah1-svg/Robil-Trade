@@ -124,16 +124,21 @@ class OAuth2Provider(CredentialProvider):
             init.raise_for_status()
             d = init.json()
 
-            # Codex returns: url, user_code, device_code
-            # RFC 8628 returns: verification_uri, user_code, device_code
+            # Codex returns: device_auth_id, user_code, interval, expires_at
+            # RFC 8628 returns: device_code, verification_uri, user_code
             verification = (
                 d.get("url")
                 or d.get("verification_url")
                 or d.get("verification_uri")
                 or d.get("verification_uri_complete")
             )
+            # Codex doesn't return verification URL — use known default
+            if not verification and "device_auth_id" in d:
+                verification = "https://auth.openai.com/codex/device"
+
             user_code = d.get("user_code")
-            device_code = d.get("device_code")
+            # Codex uses 'device_auth_id' instead of 'device_code'
+            device_code = d.get("device_code") or d.get("device_auth_id")
             if not device_code:
                 raise RuntimeError(
                     f"{self.provider_id}: respons device-init tidak punya 'device_code' "
@@ -155,11 +160,15 @@ class OAuth2Provider(CredentialProvider):
 
             while True:
                 await asyncio.sleep(interval)
-                poll_data = {
+                poll_data: dict[str, str] = {
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "device_code": device_code,
                     "client_id": self.client_id,
                 }
+                # Codex uses 'device_auth_id', RFC 8628 uses 'device_code'
+                if "device_auth_id" in d:
+                    poll_data["device_auth_id"] = device_code
+                else:
+                    poll_data["device_code"] = device_code
                 if self.client_secret:
                     poll_data["client_secret"] = self.client_secret
 

@@ -30,7 +30,6 @@ from rtrade.indicators.engine import compute as compute_indicators
 from rtrade.indicators.engine import snapshot as indicator_snapshot
 from rtrade.indicators.structure import cluster_sr_levels, detect_gaps, detect_swing_points
 from rtrade.llm.cascade import should_escalate
-from rtrade.llm.client import LLMClient
 from rtrade.llm.context_pack import ContextPack, build_context_pack
 from rtrade.llm.model_router import resolve_role_model
 from rtrade.llm.pipeline import PipelineDecision, run_llm_pipeline
@@ -59,14 +58,33 @@ from rtrade.strategies import STRATEGY_REGISTRY, StrategyConfig
 logger = structlog.get_logger(__name__)
 
 
+_SCAN_POOL_CACHE: Any = None
+
+
 def _build_llm_client(cfg: AppConfig) -> Any:
-    """LLMClient dengan credential pool (A9). Fallback otomatis antar key/akun."""
+    """LLMClient dengan credential pool singleton (C5).
+
+    Pool dibangun SEKALI per proses lalu dipakai ulang → cooldown rate-limit
+    bertahan antar-kandidat & antar-cycle. redis_client diteruskan supaya cooldown
+    juga persisten di Redis (lintas proses).
+    """
+    global _SCAN_POOL_CACHE
+    from rtrade.llm.client import LLMClient
     from rtrade.llm.pool_builder import build_scan_pool
+
+    if _SCAN_POOL_CACHE is None:
+        try:
+            import redis.asyncio as aioredis
+
+            redis_client = aioredis.from_url(cfg.secrets.redis_url)
+        except Exception:
+            redis_client = None
+        _SCAN_POOL_CACHE = build_scan_pool(cfg, redis_client=redis_client)
 
     return LLMClient(
         timeout=cfg.settings.llm.timeout_seconds,
         temperature=cfg.settings.llm.temperature,
-        credential_pool=build_scan_pool(cfg),
+        credential_pool=_SCAN_POOL_CACHE,
     )
 
 

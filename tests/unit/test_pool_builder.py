@@ -117,3 +117,20 @@ def test_flavor_mapping_codex_xai() -> None:
     assert _FLAVOR_BY_PROVIDER_ID["codex_oauth"] == "openai"
     assert _FLAVOR_BY_PROVIDER_ID["xai_oauth"] == "xai"
     assert _FLAVOR_BY_PROVIDER_ID["xai_hermes"] == "xai"
+
+
+def test_build_scan_pool_accepts_redis_client(monkeypatch, tmp_path) -> None:
+    """build_scan_pool menerima redis_client tanpa error (cooldown persisten)."""
+    monkeypatch.setenv("RTRADE_TOKEN_DIR", str(tmp_path / "tok"))
+    monkeypatch.setenv("RTRADE_ADC_DIR", str(tmp_path / "adc"))
+    from rtrade.core.config import AppConfig, Secrets
+    from rtrade.llm.pool_builder import build_scan_pool
+
+    cfg = AppConfig.load()
+    object.__setattr__(cfg, "secrets", Secrets(gemini_api_key_1="AIza1"))
+
+    class _FakeRedis:  # cukup objek non-None; KeyManager hanya dipakai saat report/acquire async
+        pass
+
+    pool = build_scan_pool(cfg, redis_client=_FakeRedis())
+    assert pool.size == 1

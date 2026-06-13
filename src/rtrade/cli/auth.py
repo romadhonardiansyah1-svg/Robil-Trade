@@ -1,8 +1,10 @@
-"""Login OAuth: python -m rtrade.cli.auth login --provider google
+"""Login OAuth: python -m rtrade.cli.auth login --provider google --account utama
 
 google  → device/installed-app flow via google-auth-oauthlib (scope cloud-platform),
-          simpan refresh token ke ADC default (well-known location google).
+          simpan refresh token ke ADC per-akun (& well-known path bila akun default).
 generic → OAuth2Provider.device_login() memakai config dari env (token store rtrade).
+codex_oauth / xai_oauth → Device Code Flow via manifest (Hermes-style).
+A5: multi-akun per provider, subcommand accounts, fallback pool.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ def _require_env(name: str) -> str:
     return val
 
 
-def _google_login(flow_override: str | None = None) -> None:
+def _google_login(flow_override: str | None = None, account: str = "default") -> None:
     from rtrade.llm.auth.login_flows import LoginFlow, auto_flow
 
     flow_kind = auto_flow(flow_override)
@@ -49,30 +51,39 @@ def _google_login(flow_override: str | None = None) -> None:
         gflow.fetch_token(authorization_response=redirect_response)
         creds = gflow.credentials
 
-    # Simpan ke ADC well-known path supaya google-auth & litellm otomatis memakainya.
+    # Simpan ADC per-akun; akun 'default' juga ditulis ke well-known path supaya
+    # google-auth & litellm lama tetap bekerja tanpa konfigurasi.
     import json
-    from pathlib import Path
 
-    adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
-    adc.parent.mkdir(parents=True, exist_ok=True)
-    adc.write_text(
-        json.dumps(
-            {
-                "type": "authorized_user",
-                "client_id": creds.client_id,
-                "client_secret": creds.client_secret,
-                "refresh_token": creds.refresh_token,
-            }
-        ),
-        encoding="utf-8",
+    from rtrade.llm.auth.token_store import account_store_id  # validasi nama akun
+    from rtrade.llm.auth.vertex import adc_path_for
+
+    account_store_id("google", account)  # raise ValueError bila nama akun tidak valid
+    payload = json.dumps(
+        {
+            "type": "authorized_user",
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "refresh_token": creds.refresh_token,
+        }
     )
-    logger.info("google login sukses — ADC tersimpan", path=str(adc))
+    per_account = adc_path_for(account)
+    per_account.write_text(payload, encoding="utf-8")
+    if account == "default":
+        from pathlib import Path
+
+        adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+        adc.parent.mkdir(parents=True, exist_ok=True)
+        adc.write_text(payload, encoding="utf-8")
+    logger.info("google login sukses — ADC tersimpan", account=account, path=str(per_account))
 
 
 def _cmd_login(args: argparse.Namespace) -> None:
     flow = getattr(args, "flow", None)
+    account = getattr(args, "account", "default")
+
     if args.provider == "google":
-        _google_login(flow_override=flow)
+        _google_login(flow_override=flow, account=account)
     elif args.provider == "generic":
         from rtrade.llm.auth.registry import build_generic_oauth_from_env
 
@@ -81,6 +92,7 @@ def _cmd_login(args: argparse.Namespace) -> None:
         # Hermes-style: load profile and login via appropriate flow
         from rtrade.llm.auth.provider_profiles import load_provider_profiles
         from rtrade.llm.auth.registry import build_provider_from_profile
+        from rtrade.llm.auth.token_store import account_store_id
 
         profiles = load_provider_profiles(None)
         if args.provider not in profiles:
@@ -96,8 +108,11 @@ def _cmd_login(args: argparse.Namespace) -> None:
                 f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
             )
             sys.exit(1)
-        provider = build_provider_from_profile(args.provider)
+        # Build store_id = provider__account
+        sid = account_store_id(args.provider, account)
+        provider = build_provider_from_profile(args.provider, store_id=sid)
         asyncio.run(provider.device_login())
+        print(f"✓ Login berhasil — token tersimpan ({sid})")  # noqa: T201
 
 
 def _cmd_providers(_args: argparse.Namespace) -> None:
@@ -132,12 +147,29 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
 
 def _cmd_logout(args: argparse.Namespace) -> None:
-    from rtrade.llm.auth.token_store import delete_token
+    from rtrade.llm.auth.token_store import account_store_id, delete_token
 
-    if delete_token(args.provider):
-        print(f"Token {args.provider} dihapus.")  # noqa: T201
+    account = getattr(args, "account", "default")
+    sid = account_store_id(args.provider, account)
+    if delete_token(sid):
+        print(f"Token {sid} dihapus.")  # noqa: T201
     else:
-        print(f"Tidak ada token untuk {args.provider}.")  # noqa: T201
+        print(f"Tidak ada token untuk {sid}.")  # noqa: T201
+
+
+def _cmd_accounts(args: argparse.Namespace) -> None:
+    from rtrade.llm.auth.token_store import list_accounts
+
+    accs = list_accounts(args.provider)
+    if args.provider in ("google", "google_vertex"):
+        from rtrade.llm.auth.vertex import list_adc_accounts
+
+        accs = sorted(set(accs) | set(list_adc_accounts()))
+    if not accs:
+        print(f"{args.provider}: belum ada akun tersimpan")  # noqa: T201
+        return
+    for a in accs:
+        print(f"{args.provider}: {a}")  # noqa: T201
 
 
 def _cmd_doctor(args: argparse.Namespace) -> None:
@@ -156,6 +188,7 @@ def _cmd_doctor(args: argparse.Namespace) -> None:
         resolved = resolve_env_profile(profile)
         print(f"  token_url: {'set' if resolved.token_url else 'missing'}")  # noqa: T201
         print(f"  client_id: {'set' if resolved.client_id else 'missing'}")  # noqa: T201
+        print(f"  device_auth_url: {'set' if resolved.device_auth_url else 'missing'}")  # noqa: T201
     except Exception as e:
         print(f"  error: {e}")  # noqa: T201
 
@@ -245,12 +278,44 @@ def _cmd_use(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_pool(_args: argparse.Namespace) -> None:
+    """Tampilkan isi credential pool + status tiap credential."""
+    from rtrade.core.config import AppConfig
+    from rtrade.llm.pool_builder import build_credential_pool
+
+    try:
+        cfg = AppConfig.load()
+        pool = build_credential_pool(cfg)
+    except Exception as exc:
+        print(f"POOL KOSONG / ERROR: {exc}")  # noqa: T201
+        sys.exit(1)
+    print(f"\n{'#':<3} {'cred_id':<28} {'flavor':<10} {'mode':<10} status")  # noqa: T201
+    print("-" * 70)  # noqa: T201
+    for i, e in enumerate(pool.entries, start=1):
+        status = "ready"
+        if e.credential.mode == "cli_oauth":
+            from rtrade.llm.auth.token_store import load_token
+
+            sid = getattr(e.credential, "token_store_id", "") or getattr(
+                e.credential, "provider_id", ""
+            )
+            status = "logged_in" if load_token(sid) else "NOT_LOGGED_IN"
+        print(  # noqa: T201
+            f"{i:<3} {e.cred_id:<28} {e.flavor:<10} {e.credential.mode:<10} {status}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="rtrade-auth", description="OAuth auth management")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     login = sub.add_parser("login", help="Login ke provider")
     login.add_argument("--provider", required=True)
+    login.add_argument(
+        "--account",
+        default="default",
+        help="Label akun (multi-akun per provider, mis. 'kerja', 'pribadi')",
+    )
     login.add_argument(
         "--flow",
         choices=["loopback", "paste_url", "device_code"],
@@ -265,6 +330,7 @@ def main() -> None:
 
     logout = sub.add_parser("logout", help="Remove stored token")
     logout.add_argument("--provider", required=True)
+    logout.add_argument("--account", default="default")
 
     doctor = sub.add_parser("doctor", help="Diagnose provider config")
     doctor.add_argument("--provider", required=True)
@@ -278,6 +344,11 @@ def main() -> None:
     use.add_argument("--model", required=True)
     use.add_argument("--force", action="store_true", help="Skip model catalog validation")
 
+    accounts = sub.add_parser("accounts", help="List akun tersimpan per provider")
+    accounts.add_argument("--provider", required=True)
+
+    sub.add_parser("pool", help="Tampilkan credential pool + status")
+
     args = parser.parse_args()
     dispatch = {
         "login": _cmd_login,
@@ -287,6 +358,8 @@ def main() -> None:
         "doctor": _cmd_doctor,
         "models": _cmd_models,
         "use": _cmd_use,
+        "accounts": _cmd_accounts,
+        "pool": _cmd_pool,
     }
     dispatch[args.cmd](args)
 

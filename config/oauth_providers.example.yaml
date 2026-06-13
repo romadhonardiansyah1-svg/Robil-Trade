@@ -108,8 +108,9 @@ oauth_providers:
     login_flow: device_code
     requires_official_oauth: false
     transport: HTTPS
-    device_auth_url: "https://auth.openai.com/authorize/device"
-    token_url: "https://auth.openai.com/oauth/token"
+    device_auth_url: "https://auth.openai.com/api/accounts/deviceauth/usercode"
+    token_url: "https://auth.openai.com/api/accounts/deviceauth/token"
+    client_id: "app_EMoamEEZ73f0CkXaXp7hrann"
     models:
       - openai/gpt-4.1
       - openai/gpt-4.1-mini

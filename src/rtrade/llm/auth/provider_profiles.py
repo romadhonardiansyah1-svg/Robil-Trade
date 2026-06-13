@@ -34,6 +34,7 @@ class OAuthProviderProfile:
     external_command: list[str] = field(default_factory=list)
     device_auth_url: str = ""  # A0: hardcoded default (manifest inline)
     token_url: str = ""  # A0: hardcoded default (manifest inline)
+    client_id: str = ""  # A0: hardcoded default (manifest inline)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,7 @@ def load_provider_profiles(
             external_command=data.get("external_command", []),
             device_auth_url=data.get("device_auth_url", ""),
             token_url=data.get("token_url", ""),
+            client_id=data.get("client_id", ""),
         )
     return result
 
@@ -140,7 +142,9 @@ def resolve_env_profile(profile: OAuthProviderProfile) -> ResolvedOAuthProfile:
     if not token_url and profile.token_url_env:
         token_url = os.environ.get(profile.token_url_env, "")
 
-    client_id = os.environ.get(profile.client_id_env, "") if profile.client_id_env else ""
+    client_id = profile.client_id  # A0: inline manifest value
+    if not client_id and profile.client_id_env:
+        client_id = os.environ.get(profile.client_id_env, "")
     scopes_raw = os.environ.get(profile.scopes_env, "") if profile.scopes_env else ""
 
     device_url = profile.device_auth_url  # A0: inline manifest value

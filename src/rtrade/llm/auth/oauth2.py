@@ -114,11 +114,21 @@ class OAuth2Provider(CredentialProvider):
             init_data: dict[str, str] = {"client_id": self.client_id}
             if self.scopes:
                 init_data["scope"] = " ".join(self.scopes)
-            init = await client.post(self.device_auth_url, data=init_data)
+
+            # Try JSON body first (Codex-style), fallback to form data (RFC 8628)
+            headers = {"Content-Type": "application/json"}
+            init = await client.post(self.device_auth_url, json=init_data, headers=headers)
+            if init.status_code >= 400:
+                # Fallback: standard RFC 8628 form-encoded
+                init = await client.post(self.device_auth_url, data=init_data)
             init.raise_for_status()
             d = init.json()
+
+            # Codex returns: url, user_code, device_code
+            # RFC 8628 returns: verification_uri, user_code, device_code
             verification = (
-                d.get("verification_url")
+                d.get("url")
+                or d.get("verification_url")
                 or d.get("verification_uri")
                 or d.get("verification_uri_complete")
             )
@@ -145,15 +155,18 @@ class OAuth2Provider(CredentialProvider):
 
             while True:
                 await asyncio.sleep(interval)
-                poll = await client.post(
-                    self.token_url,
-                    data={
-                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                        "device_code": device_code,
-                        "client_id": self.client_id,
-                        "client_secret": self.client_secret,
-                    },
-                )
+                poll_data = {
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    "device_code": device_code,
+                    "client_id": self.client_id,
+                }
+                if self.client_secret:
+                    poll_data["client_secret"] = self.client_secret
+
+                # Try JSON first (Codex), fallback to form
+                poll = await client.post(self.token_url, json=poll_data, headers=headers)
+                if poll.status_code >= 400:
+                    poll = await client.post(self.token_url, data=poll_data)
                 body = poll.json()
                 if "access_token" in body:
                     tok = StoredToken(

@@ -6,9 +6,7 @@ Wraps litellm.acompletion() with:
 - Configurable timeout (default 45s total pipeline)
 - Token counting + cost logging per call
 - Fallback chain handled by LiteLLM router
-
-The application code calls this client with model ALIASES (trading-analyst,
-trading-critic, trading-backup). LiteLLM resolves them to actual providers.
+- A8: credential_pool for multi-credential fallback with cooldown
 """
 
 from __future__ import annotations
@@ -26,6 +24,12 @@ import structlog
 from pydantic import BaseModel
 
 from rtrade.core.errors import LLMOutputError, LLMUnavailableError
+from rtrade.llm.auth.pool import (
+    AllCredentialsExhaustedError,
+    CredentialPool,
+    classify_llm_error,
+    translate_model,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -52,6 +56,7 @@ class LLMClient:
 
     Uses library mode (no separate proxy process). Model aliases are
     resolved by litellm's router based on config/litellm.yaml.
+    A8: credential_pool for multi-credential fallback.
     """
 
     api_key: str = ""
@@ -59,6 +64,7 @@ class LLMClient:
     max_retries: int = 1
     temperature: float = 0.2
     credential_provider: CredentialProvider | None = None
+    credential_pool: CredentialPool | None = None
     _call_count: int = field(default=0, init=False, repr=False)
     _total_cost: float = field(default=0.0, init=False, repr=False)
     _total_tokens: int = field(default=0, init=False, repr=False)
@@ -74,20 +80,8 @@ class LLMClient:
     ) -> LLMCallResult:
         """Call LLM with optional structured output.
 
-        Args:
-            model: LiteLLM model alias (e.g. 'gemini/gemini-3.1-flash-lite')
-            system_prompt: System message content.
-            user_prompt: User message content.
-            response_schema: If provided, request structured JSON output
-                matching this Pydantic model.
-            temperature: Override default temperature.
-
-        Returns:
-            LLMCallResult with parsed content and usage stats.
-
-        Raises:
-            LLMOutputError: If JSON output is invalid after retries.
-            LLMUnavailableError: If all providers fail.
+        Bila credential_pool diset: gagal rate-limit/auth pada satu kredensial →
+        kredensial itu cooldown dan panggilan pindah ke kredensial berikutnya.
         """
         temp = temperature if temperature is not None else self.temperature
         messages = [
@@ -95,31 +89,91 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
 
-        kwargs: dict[str, Any] = {
-            "model": model,
+        base_kwargs: dict[str, Any] = {
             "messages": messages,
             "temperature": temp,
             "timeout": self.timeout,
         }
-
-        if self.credential_provider is not None:
-            material = await self.credential_provider.resolve()
-            material.merge_into(kwargs)
-        elif self.api_key:
-            kwargs["api_key"] = self.api_key
-
-        # Request structured JSON output if schema provided.
         if response_schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_object",
-            }
-            # Add schema hint to system prompt.
+            base_kwargs["response_format"] = {"type": "json_object"}
             schema_json = json.dumps(response_schema.model_json_schema(), indent=2)
             messages[0]["content"] += (
                 f"\n\nYou MUST respond with valid JSON matching this schema:\n"
                 f"```json\n{schema_json}\n```"
             )
 
+        # --- jalur lama (tanpa pool) — TIDAK berubah perilakunya ---
+        if self.credential_pool is None:
+            kwargs = dict(base_kwargs)
+            kwargs["model"] = model
+            if self.credential_provider is not None:
+                material = await self.credential_provider.resolve()
+                material.merge_into(kwargs)
+            elif self.api_key:
+                kwargs["api_key"] = self.api_key
+            return await self._attempt_loop(kwargs, model, response_schema)
+
+        # --- jalur pool: fallback antar kredensial ---
+        pool = self.credential_pool
+        tried: set[str] = set()
+        last_error: Exception | None = None
+        while True:
+            try:
+                cred = await pool.acquire(exclude=tried)
+            except AllCredentialsExhaustedError as exc:
+                raise LLMUnavailableError(
+                    f"semua kredensial gagal/cooldown untuk {model}: {last_error}"
+                ) from exc
+            tried.add(cred.cred_id)
+
+            actual_model = translate_model(model, cred.flavor)
+            if actual_model is None:
+                logger.debug(
+                    "credential flavor tidak kompatibel — skip",
+                    cred_id=cred.cred_id,
+                    flavor=cred.flavor,
+                    model=model,
+                )
+                continue
+
+            kwargs = dict(base_kwargs)
+            kwargs["model"] = actual_model
+            try:
+                material = await cred.credential.resolve()
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "credential resolve gagal — cooldown & lanjut",
+                    cred_id=cred.cred_id,
+                    error=str(exc),
+                )
+                await pool.report_failure(cred.cred_id, kind="auth")
+                continue
+            material.merge_into(kwargs)
+
+            try:
+                return await self._attempt_loop(kwargs, actual_model, response_schema)
+            except LLMUnavailableError as exc:
+                cause = exc.__cause__ or exc
+                kind = classify_llm_error(cause)
+                last_error = exc
+                if kind in ("rate_limit", "auth"):
+                    logger.warning(
+                        "credential kena limit/auth — fallback ke berikutnya",
+                        cred_id=cred.cred_id,
+                        kind=kind,
+                    )
+                    await pool.report_failure(cred.cred_id, kind=kind)
+                    continue
+                raise
+
+    async def _attempt_loop(
+        self,
+        kwargs: dict[str, Any],
+        model: str,
+        response_schema: type[BaseModel] | None,
+    ) -> LLMCallResult:
+        """Loop retry untuk SATU kredensial (perilaku lama complete())."""
         last_error: Exception | None = None
         attempts = 1 + self.max_retries
 
@@ -136,7 +190,6 @@ class LLMClient:
                 completion_tokens = getattr(usage, "completion_tokens", 0) or 0
                 total_tokens = prompt_tokens + completion_tokens
 
-                # Estimate cost from litellm.
                 cost = _estimate_cost(model, prompt_tokens, completion_tokens)
 
                 result = LLMCallResult(
@@ -149,7 +202,6 @@ class LLMClient:
                     latency_ms=latency,
                 )
 
-                # Validate JSON if schema was requested.
                 if response_schema is not None:
                     _validate_json(content, response_schema)
 

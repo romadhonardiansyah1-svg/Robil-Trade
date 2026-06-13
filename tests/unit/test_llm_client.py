@@ -178,3 +178,66 @@ class TestEstimateCost:
         result = client_mod._estimate_cost("unknown-model", 100, 50)
         expected = 100 * 7.5e-8 + 50 * 3e-7
         assert result == pytest.approx(expected)
+
+
+class TestPoolFallback:
+    """A8: credential pool fallback on rate limit / auth errors."""
+
+    def test_pool_fallback_on_rate_limit(self, monkeypatch) -> None:
+        """Kredensial pertama 429 → client otomatis pakai kredensial kedua."""
+        import asyncio
+
+        from rtrade.llm.auth.api_key import ApiKeyProvider
+        from rtrade.llm.auth.pool import CredentialPool, PooledCredential
+
+        pool = CredentialPool(
+            [
+                PooledCredential("k1", "gemini", ApiKeyProvider("AIza-limit")),
+                PooledCredential("k2", "gemini", ApiKeyProvider("AIza-ok")),
+            ]
+        )
+        calls: list[str] = []
+
+        async def fake_acompletion(**kwargs):
+            calls.append(kwargs["api_key"])
+            if kwargs["api_key"] == "AIza-limit":
+                raise Exception("HTTP 429 rate limit exceeded")
+
+            class Msg:
+                content = '{"ok": true}'
+
+            class Choice:
+                message = Msg()
+
+            class Usage:
+                prompt_tokens = 1
+                completion_tokens = 1
+
+            class Resp:
+                choices = [Choice()]
+                usage = Usage()
+
+            return Resp()
+
+        monkeypatch.setattr("litellm.acompletion", fake_acompletion)
+        client = LLMClient(max_retries=0, credential_pool=pool)
+        result = asyncio.run(client.complete("gemini/test-model", "sys", "user"))
+        assert result.content == '{"ok": true}'
+        assert calls == ["AIza-limit", "AIza-ok"]
+
+    def test_pool_all_exhausted_raises_unavailable(self, monkeypatch) -> None:
+        """Semua kredensial gagal → LLMUnavailableError."""
+        import asyncio
+
+        from rtrade.llm.auth.api_key import ApiKeyProvider
+        from rtrade.llm.auth.pool import CredentialPool, PooledCredential
+
+        pool = CredentialPool([PooledCredential("k1", "gemini", ApiKeyProvider("AIza-bad"))])
+
+        async def fail(**kwargs):
+            raise Exception("HTTP 429 rate limit exceeded")
+
+        monkeypatch.setattr("litellm.acompletion", fail)
+        client = LLMClient(max_retries=0, credential_pool=pool)
+        with pytest.raises(LLMUnavailableError, match="semua kredensial"):
+            asyncio.run(client.complete("gemini/test-model", "sys", "user"))

@@ -198,12 +198,23 @@ class OAuth2Provider(CredentialProvider):
                     logger.info("device code login berhasil", provider=self._sid)
                     return tok
                 error = body.get("error", "")
-                # Codex error can be a dict or string
-                error_str = error if isinstance(error, str) else str(error)
-                if error_str == "slow_down":
+
+                # Codex returns nested error: {"error": {"code": "deviceauth_authorization_pending"}}
+                # RFC 8628 returns flat: {"error": "authorization_pending"}
+                if isinstance(error, dict):
+                    error_code = error.get("code", "")
+                    if error_code == "deviceauth_authorization_pending":
+                        continue
+                    if "slow_down" in error_code:
+                        interval += 5
+                        continue
+                    raise RuntimeError(f"device login gagal: {body}")
+
+                # RFC 8628 flat error
+                if error == "slow_down":
                     interval += 5
                     continue
-                if error_str not in ("authorization_pending", ""):
+                if error not in ("authorization_pending", ""):
                     raise RuntimeError(f"device login gagal: {body}")
 
     # --- PKCE paste-URL support (O12) ---

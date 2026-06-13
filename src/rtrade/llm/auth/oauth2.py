@@ -39,13 +39,19 @@ class OAuth2Provider(CredentialProvider):
     scopes: list[str] = field(default_factory=list)
     grant_type: str = "client_credentials"  # | "device_code"
     device_auth_url: str = ""
+    store_id: str = ""  # A3: token store id; kosong = provider_id (akun default)
 
     @property
     def mode(self) -> str:
         return "oauth2"
 
+    @property
+    def _sid(self) -> str:
+        """Store id — akun spesifik atau provider_id default."""
+        return self.store_id or self.provider_id
+
     async def resolve(self) -> AuthMaterial:
-        token = load_token(self.provider_id)
+        token = load_token(self._sid)
         now = time.time()
         if token is not None and token.expiry_epoch - _REFRESH_SKEW > now:
             return AuthMaterial(
@@ -61,7 +67,7 @@ class OAuth2Provider(CredentialProvider):
             raise RuntimeError(
                 f"{self.provider_id}: tidak ada token valid. Jalankan `rtrade auth login`."
             )
-        save_token(self.provider_id, token)
+        save_token(self._sid, token)
         return AuthMaterial(
             bearer_token=token.access_token,
             auth_type="cli_oauth",
@@ -103,20 +109,36 @@ class OAuth2Provider(CredentialProvider):
         )
 
     async def device_login(self) -> StoredToken:
-        """Device-code flow interaktif (dipanggil CLI O4). Mencetak URL + kode."""
+        """Device-code flow interaktif (Hermes-style). Mencetak URL + kode."""
         async with httpx.AsyncClient(timeout=30.0) as client:
-            init = await client.post(
-                self.device_auth_url,
-                data={"client_id": self.client_id, "scope": " ".join(self.scopes)},
-            )
+            init_data: dict[str, str] = {"client_id": self.client_id}
+            if self.scopes:
+                init_data["scope"] = " ".join(self.scopes)
+            init = await client.post(self.device_auth_url, data=init_data)
             init.raise_for_status()
             d = init.json()
-            verification = d.get("verification_url") or d.get("verification_uri")
-            logger.info("buka URL ini & masukkan kode", url=verification, code=d["user_code"])
+            verification = (
+                d.get("verification_uri_complete")
+                or d.get("verification_url")
+                or d.get("verification_uri")
+            )
+            user_code = d["user_code"]
             interval = float(d.get("interval", 5))
             device_code = d["device_code"]
+
+            # Hermes-style display
+            print(f"\n{'=' * 60}")  # noqa: T201
+            print(f"  Buka : {verification}")  # noqa: T201
+            print(f"  Kode : {user_code}")  # noqa: T201
+            print(f"{'=' * 60}")  # noqa: T201
+            print("  Menunggu Anda login di browser...\n")  # noqa: T201
+
+            logger.info(
+                "device code flow dimulai", url=verification, code=user_code, provider=self._sid
+            )
+
             while True:
-                await asyncio.sleep(interval)  # K6: async-aman, jangan blok event loop
+                await asyncio.sleep(interval)
                 poll = await client.post(
                     self.token_url,
                     data={
@@ -134,9 +156,14 @@ class OAuth2Provider(CredentialProvider):
                         time.time() + float(body.get("expires_in", 3600)),
                         self.scopes,
                     )
-                    save_token(self.provider_id, tok)
+                    save_token(self._sid, tok)
+                    logger.info("device code login berhasil", provider=self._sid)
                     return tok
-                if body.get("error") not in ("authorization_pending", "slow_down"):
+                error = body.get("error", "")
+                if error == "slow_down":
+                    interval += 5
+                    continue
+                if error != "authorization_pending":
                     raise RuntimeError(f"device login gagal: {body.get('error')}")
 
     # --- PKCE paste-URL support (O12) ---
@@ -185,7 +212,7 @@ class OAuth2Provider(CredentialProvider):
             "code_verifier": code_verifier,
         }
         tok = await self._token_request(data)
-        save_token(self.provider_id, tok)
+        save_token(self._sid, tok)
         return tok
 
 

@@ -1,6 +1,8 @@
 # OAuth Provider Profiles — Manifest Hermes-style
 # Satu file tunggal yang mendefinisikan semua provider OAuth yang didukung.
 # File ini adalah config template (salin ke config/oauth_providers.yaml untuk prod).
+# Multi-akun: `rtrade auth login --provider <id> --account <label>` — tiap akun jadi
+# anggota credential pool dan dipakai fallback otomatis saat akun lain kena limit.
 
 oauth_providers:
 
@@ -56,41 +58,155 @@ oauth_providers:
     transport: HTTPS
     models_url_env: RTRADE_OAUTH_MODELS_URL
 
-  codex_openai:
-    label: "OpenAI / Codex (via official OAuth or gateway)"
-    auth_mode: oauth2
-    capability: disabled_unsupported
-    enabled: false
-    token_url_env: RTRADE_OPENAI_OAUTH_TOKEN_URL
-    client_id_env: RTRADE_OPENAI_OAUTH_CLIENT_ID
-    scopes_env: RTRADE_OPENAI_OAUTH_SCOPES
-    device_auth_url_env: RTRADE_OPENAI_OAUTH_DEVICE_URL
-    note: >
-      DILARANG membaca token Codex CLI, ChatGPT session, atau browser credential.
-      Aktif HANYA bila endpoint OAuth resmi/gateway enterprise dikonfigurasi.
-    login_flow: paste_url
-    requires_official_oauth: true
+  # -------------------------------------------------------------------------
+  # OPENAI / CODEX
+  # -------------------------------------------------------------------------
+  openai_api:
+    label: "OpenAI official API key"
+    auth_mode: api_key
+    capability: api_key
+    enabled: true
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: "Gunakan OPENAI_API_KEY_1..3; ini jalur resmi untuk API backend."
+    login_flow: none
+    requires_official_oauth: false
     transport: HTTPS
     models:
       - openai/gpt-4.1
       - openai/gpt-4.1-mini
 
-  xai:
-    label: "xAI (Grok)"
+  openai_gateway:
+    label: "OpenAI-compatible OAuth gateway"
     auth_mode: oauth2
-    capability: disabled_unsupported
+    capability: oauth_gateway
     enabled: false
-    token_url_env: RTRADE_XAI_OAUTH_TOKEN_URL
-    client_id_env: RTRADE_XAI_OAUTH_CLIENT_ID
-    scopes_env: RTRADE_XAI_OAUTH_SCOPES
-    device_auth_url_env: RTRADE_XAI_OAUTH_DEVICE_URL
-    note: >
-      API key resmi (dari console.x.ai) didukung langsung tanpa OAuth.
-      OAuth mode aktif hanya bila endpoint resmi tersedia.
+    token_url_env: RTRADE_OPENAI_GATEWAY_TOKEN_URL
+    client_id_env: RTRADE_OPENAI_GATEWAY_CLIENT_ID
+    scopes_env: RTRADE_OPENAI_GATEWAY_SCOPES
+    device_auth_url_env: RTRADE_OPENAI_GATEWAY_DEVICE_URL
+    note: "Hanya untuk gateway enterprise/self-hosted yang memang menerbitkan token API."
     login_flow: device_code
     requires_official_oauth: true
     transport: HTTPS
+    models_url_env: RTRADE_OPENAI_GATEWAY_MODELS_URL
+
+  codex_oauth:
+    label: "OpenAI Codex OAuth (langganan ChatGPT)"
+    auth_mode: oauth2
+    capability: subscription_oauth
+    enabled: true
+    token_url_env: RTRADE_CODEX_TOKEN_URL
+    client_id_env: RTRADE_CODEX_CLIENT_ID
+    scopes_env: ""
+    device_auth_url_env: RTRADE_CODEX_DEVICE_AUTH_URL
+    note: >
+      Login akun ChatGPT via Device Code Flow (gaya Hermes codex-oauth).
+      Token disimpan di token_store terenkripsi, auto-refresh, masuk credential pool.
+    login_flow: device_code
+    requires_official_oauth: false
+    transport: HTTPS
+    device_auth_url: "https://auth.openai.com/authorize/device"
+    token_url: "https://auth.openai.com/oauth/token"
+    models:
+      - openai/gpt-4.1
+      - openai/gpt-4.1-mini
+      - openai/o3
+      - openai/o4-mini
+      - openai/codex-mini
+
+  codex_openai:
+    label: "Alias lama → codex_oauth"
+    auth_mode: oauth2
+    capability: subscription_oauth
+    enabled: false
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: "Alias lama; gunakan codex_oauth. Dimatikan supaya tidak duplikat di pool."
+    login_flow: device_code
+    requires_official_oauth: false
+    transport: HTTPS
+
+  # -------------------------------------------------------------------------
+  # xAI / GROK
+  # -------------------------------------------------------------------------
+  xai_api:
+    label: "xAI official API key (console.x.ai)"
+    auth_mode: api_key
+    capability: api_key
+    enabled: true
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: "Gunakan XAI_API_KEY_1..3; masuk credential pool sebagai flavor xai."
+    login_flow: none
+    requires_official_oauth: false
+    transport: HTTPS
+    models:
+      - xai/grok-4
+      - xai/grok-3
+
+  xai_oauth:
+    label: "xAI Grok OAuth (langganan SuperGrok/X Premium+)"
+    auth_mode: oauth2
+    capability: subscription_oauth
+    enabled: true
+    token_url_env: RTRADE_XAI_TOKEN_URL
+    client_id_env: RTRADE_XAI_CLIENT_ID
+    scopes_env: ""
+    device_auth_url_env: RTRADE_XAI_DEVICE_AUTH_URL
+    note: >
+      Login akun X/SuperGrok via Device Code Flow (gaya Hermes xai-oauth).
+      Token disimpan di token_store terenkripsi, auto-refresh, masuk credential pool.
+    login_flow: device_code
+    requires_official_oauth: false
+    transport: HTTPS
+    device_auth_url: "https://accounts.x.ai/oauth/authorize/device"
+    token_url: "https://accounts.x.ai/oauth/token"
+    models:
+      - xai/grok-4
+      - xai/grok-3
+
+  xai_hermes:
+    label: "xAI Hermes-style external adapter"
+    auth_mode: external_command
+    capability: external_adapter
+    enabled: false
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: >
+      Jalur untuk adapter lokal/operator yang melakukan login xAI ala Hermes dan mencetak
+      JSON token standar ke stdout. Core bot tidak membaca cookie/session/token aplikasi lain.
+    login_flow: external_command
+    requires_official_oauth: false
+    transport: local_process
+    external_command:
+      - "${RTRADE_XAI_AUTH_ADAPTER_BIN}"
+      - "login"
+      - "--provider"
+      - "xai"
     models_url_env: RTRADE_XAI_MODELS_URL
+
+  xai:
+    label: "Alias lama → xai_api"
+    auth_mode: api_key
+    capability: api_key
+    enabled: true
+    token_url_env: ""
+    client_id_env: ""
+    scopes_env: ""
+    device_auth_url_env: ""
+    note: "Gunakan XAI_API_KEY_1..3; Hermes-style gunakan xai_hermes/xai_oauth."
+    login_flow: none
+    requires_official_oauth: false
+    transport: HTTPS
 
   custom_external:
     label: "Custom Hermes-like External Adapter"

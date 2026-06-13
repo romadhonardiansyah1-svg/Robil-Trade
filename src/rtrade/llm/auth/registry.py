@@ -2,6 +2,7 @@
 
 O6: Global registry based on llm.auth_mode.
 O11: Extended with per-profile builds (build_credential_provider_for_profile).
+A0: Subscription OAuth (Codex/xAI) via device_code from manifest.
 """
 
 from __future__ import annotations
@@ -57,9 +58,19 @@ def build_generic_oauth_from_env() -> OAuth2Provider:
 def build_provider_from_profile(
     provider_id: str,
     profile_path: object = None,
+    *,
+    store_id: str = "",
 ) -> OAuth2Provider:
-    """Build OAuth2Provider from provider profiles manifest (O8)."""
-    from rtrade.llm.auth.provider_profiles import load_provider_profiles, resolve_env_profile
+    """Build OAuth2Provider from provider profiles manifest (O8/A0).
+
+    A0: subscription_oauth (codex_oauth, xai_oauth) supported via device_code
+    with inline device_auth_url/token_url from manifest.
+    """
+    from rtrade.llm.auth.provider_profiles import (
+        load_provider_profiles,
+        resolve_env_profile,
+        validate_provider_profile,
+    )
 
     profiles = load_provider_profiles(None)
     if provider_id not in profiles:
@@ -68,6 +79,7 @@ def build_provider_from_profile(
         raise ConfigError(f"Provider '{provider_id}' tidak ditemukan di manifest")
 
     profile = profiles[provider_id]
+
     if not profile.enabled:
         from rtrade.core.errors import ConfigError
 
@@ -75,6 +87,13 @@ def build_provider_from_profile(
             f"Provider '{provider_id}' disabled. "
             f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
         )
+
+    # Validate profile
+    issues = validate_provider_profile(provider_id, profile)
+    if issues:
+        from rtrade.core.errors import ConfigError
+
+        raise ConfigError(f"profile {provider_id} invalid: {'; '.join(issues)}")
 
     if profile.auth_mode == "vertex":
         from rtrade.core.errors import ConfigError
@@ -90,4 +109,5 @@ def build_provider_from_profile(
         scopes=resolved.scopes,
         grant_type=resolved.grant_type,
         device_auth_url=resolved.device_auth_url,
+        store_id=store_id,
     )

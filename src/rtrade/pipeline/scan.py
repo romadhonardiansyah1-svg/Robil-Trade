@@ -32,6 +32,7 @@ from rtrade.indicators.structure import cluster_sr_levels, detect_gaps, detect_s
 from rtrade.llm.cascade import should_escalate
 from rtrade.llm.client import LLMClient
 from rtrade.llm.context_pack import ContextPack, build_context_pack
+from rtrade.llm.model_router import resolve_role_model
 from rtrade.llm.pipeline import PipelineDecision, run_llm_pipeline
 from rtrade.papertrack.excursion import compute_excursion
 from rtrade.papertrack.minute_resolution import resolve_ambiguous_bar
@@ -58,18 +59,15 @@ from rtrade.strategies import STRATEGY_REGISTRY, StrategyConfig
 logger = structlog.get_logger(__name__)
 
 
-def _build_cred_provider(cfg: AppConfig) -> Any:
-    """Build credential provider from config. Returns None for api_key mode (unchanged)."""
-    if cfg.settings.llm.auth_mode == "api_key":
-        return None
-    from rtrade.llm.auth.registry import build_credential_provider
+def _build_llm_client(cfg: AppConfig) -> Any:
+    """LLMClient dengan credential pool (A9). Fallback otomatis antar key/akun."""
+    from rtrade.llm.pool_builder import build_scan_pool
 
-    prov = build_credential_provider(cfg.settings.llm, cfg.secrets)
-    logger.info(
-        "auth_provider_selected",
-        mode=prov.mode,
+    return LLMClient(
+        timeout=cfg.settings.llm.timeout_seconds,
+        temperature=cfg.settings.llm.temperature,
+        credential_pool=build_scan_pool(cfg),
     )
-    return prov
 
 
 # W2: |0.05%|/8h — funding rate extreme threshold.
@@ -512,12 +510,8 @@ async def track_paper_signals(
                             from rtrade.llm.coroner import run_coroner
 
                             report = await run_coroner(
-                                LLMClient(
-                                    api_key=cfg.secrets.gemini_api_key_1,
-                                    timeout=cfg.settings.llm.timeout_seconds,
-                                    credential_provider=_build_cred_provider(cfg),
-                                ),
-                                model=cfg.settings.llm.analyst_model,
+                                _build_llm_client(cfg),
+                                model=resolve_role_model(cfg, "analyst"),
                                 candidate_payload=signal.payload.get("candidate") or {},
                                 price_path=[
                                     {
@@ -893,26 +887,22 @@ async def _run_strategies(
                 derivatives_data=derivatives_data,
                 similar_setups=similar_setups,
             )
-            client = LLMClient(
-                api_key=cfg.secrets.gemini_api_key_1,
-                timeout=cfg.settings.llm.timeout_seconds,
-                temperature=cfg.settings.llm.temperature,
-                credential_provider=_build_cred_provider(cfg),
-            )
+            client = _build_llm_client(cfg)
+            flagship_model = resolve_role_model(cfg, "flagship")
             pres = await run_llm_pipeline(
                 candidate,
                 pack,
                 client,
                 confidence_min=cfg.settings.signal.confidence_min,
-                analyst_model=cfg.settings.llm.analyst_model,
-                critic_model=cfg.settings.llm.critic_model,
+                analyst_model=resolve_role_model(cfg, "analyst"),
+                critic_model=resolve_role_model(cfg, "critic"),
             )
             # F5: Cascade escalation on doubt band.
             if should_escalate(
                 pres,
                 low=cfg.settings.llm.escalation_low,
                 high=cfg.settings.llm.escalation_high,
-                flagship_model=cfg.settings.llm.flagship_model,
+                flagship_model=flagship_model,
             ):
                 logger.info("escalating to flagship", confidence=pres.confidence)
                 pres = await run_llm_pipeline(
@@ -920,8 +910,8 @@ async def _run_strategies(
                     pack,
                     client,
                     confidence_min=cfg.settings.signal.confidence_min,
-                    analyst_model=cfg.settings.llm.flagship_model,
-                    critic_model=cfg.settings.llm.flagship_model,
+                    analyst_model=flagship_model,
+                    critic_model=flagship_model,
                 )
             status = _status_for_decision(pres.decision)
             if status != SignalStatus.PUBLISHED:

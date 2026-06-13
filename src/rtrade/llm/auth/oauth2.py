@@ -164,9 +164,10 @@ class OAuth2Provider(CredentialProvider):
                 await asyncio.sleep(interval)
 
                 if is_codex:
-                    # Codex: JSON body, minimal fields
+                    # Codex: JSON body with device_auth_id + user_code + client_id
                     codex_poll = {
                         "device_auth_id": device_code,
+                        "user_code": user_code,
                         "client_id": self.client_id,
                     }
                     poll = await client.post(

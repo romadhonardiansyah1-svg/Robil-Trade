@@ -107,7 +107,19 @@ python -m rtrade.cli.auth pool
 python -m rtrade.cli.auth use --role analyst --provider codex_oauth --model openai/gpt-4.1
 ```
 
-## Deploy ke VPS
+## Deploy OAuth di VPS (penting)
+
+OAuth (Vertex/Azure/gateway/dll.) butuh penyimpanan token persisten + terenkripsi:
+
+1. **`RTRADE_TOKEN_KEY` WAJIB di prod.** Digenerate otomatis oleh `setup_vps.sh`. Tanpa ini,
+   `auth login` gagal ("RTRADE_TOKEN_KEY wajib di prod").
+2. **Token disimpan di volume persisten** `/app/data/auth/{tokens,adc}` (di-set via
+   `RTRADE_TOKEN_DIR`/`RTRADE_ADC_DIR` di `docker-compose.prod.yml`). Container prod `read_only`,
+   jadi token TIDAK boleh ke `~/.rtrade` (root FS read-only & non-persisten).
+3. **Routing:** `auth login --provider <id> --account <acc>` (simpan token) lalu
+   `auth use --role <role> --provider <id> --model <m> --account <acc>` (kaitkan route + buat
+   `auth_profiles`). Cek hasil: `auth pool`.
+4. Tambah kredensial baru → **restart** container app (pool dibangun sekali per proses).
 
 Token OAuth bersifat **per-mesin**. Saat pindah ke VPS baru:
 

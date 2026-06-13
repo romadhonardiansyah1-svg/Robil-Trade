@@ -146,21 +146,52 @@ def _build_provider_for_profile(
 
     if auth_type == "cli_oauth":
         from rtrade.llm.auth.cli_oauth import CliOAuthProvider
+        from rtrade.llm.auth.token_store import account_store_id
 
+        pid = profile.get("provider_id", "")
+        account = profile.get("account", "default")
+        default_store = account_store_id(pid, account) if pid else ""
         return CliOAuthProvider(
-            provider_id=profile.get("provider_id", ""),
-            token_store_id=profile.get("token_store_id", profile.get("provider_id", "")),
+            provider_id=pid,
+            token_store_id=profile.get("token_store_id", default_store),
         )
 
     if auth_type == "vertex" or profile.get("credential_provider") == "vertex":
-        from rtrade.llm.auth.vertex import VertexProvider
+        from rtrade.llm.auth.vertex import VertexProvider, adc_path_for
 
+        adc_account = profile.get("adc_account", "")
+        cred_path = str(adc_path_for(adc_account)) if adc_account else ""
         return VertexProvider(
             project=profile.get("vertex_project", cfg.settings.llm.vertex_project),
             location=profile.get("vertex_location", cfg.settings.llm.vertex_location),
+            credentials_path=cred_path,
         )
 
     raise ConfigError(
         f"auth_profiles.{profile_name}.auth_type={auth_type!r} tidak dikenal. "
         "Pilihan: api_key | cli_oauth | vertex"
     )
+
+
+def resolve_role_model(cfg: AppConfig, role: str) -> str:
+    """Nama model untuk satu role — dari model_routes bila ada, else field lama."""
+    routes = cfg.settings.llm.model_routes
+    if routes and role in routes and isinstance(routes[role], dict):
+        model = str(routes[role].get("model", ""))
+        if model:
+            return model
+    model_map = {
+        "analyst": cfg.settings.llm.analyst_model,
+        "critic": cfg.settings.llm.critic_model,
+        "backup": cfg.settings.llm.analyst_model,
+        "flagship": cfg.settings.llm.flagship_model,
+    }
+    return model_map.get(role, cfg.settings.llm.analyst_model)
+
+
+def build_profile_credential(cfg: AppConfig, profile_name: str) -> CredentialProvider:
+    """Public wrapper supaya pool_builder bisa membangun provider per auth_profile."""
+    profiles = cfg.settings.llm.auth_profiles
+    if profile_name not in profiles or not isinstance(profiles[profile_name], dict):
+        raise ConfigError(f"auth_profiles.{profile_name} tidak ditemukan/invalid")
+    return _build_provider_for_profile(profiles[profile_name], profile_name, cfg)

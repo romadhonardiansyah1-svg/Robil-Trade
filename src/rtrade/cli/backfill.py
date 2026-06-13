@@ -97,8 +97,8 @@ async def _run(symbol: str, timeframe: str, days: int, config_dir: str) -> None:
                     total=total,
                     next_since=batch_since.isoformat(),
                 )
-                # Small pause to respect rate limits
-                await asyncio.sleep(2)
+                # Pause to respect rate limits (free tier: 8 req/min)
+                await asyncio.sleep(15)
 
             logger.info("backfill completed", symbol=symbol, timeframe=timeframe, total=total)
     finally:

@@ -187,9 +187,16 @@ class OAuth2Provider(CredentialProvider):
                     poll = await client.post(self.token_url, data=rfc_poll)
 
                 body = poll.json()
-                if "access_token" in body:
+                # Log response for debugging
+                logger.info("poll response", keys=sorted(body.keys()), status=poll.status_code)
+
+                # Check for token — Codex may use different field names
+                access_token = (
+                    body.get("access_token") or body.get("session_token") or body.get("token")
+                )
+                if access_token:
                     tok = StoredToken(
-                        body["access_token"],
+                        access_token,
                         body.get("refresh_token"),
                         time.time() + float(body.get("expires_in", 3600)),
                         self.scopes,

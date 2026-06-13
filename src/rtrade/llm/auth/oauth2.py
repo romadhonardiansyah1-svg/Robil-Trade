@@ -158,22 +158,33 @@ class OAuth2Provider(CredentialProvider):
                 "device code flow dimulai", url=verification, code=user_code, provider=self._sid
             )
 
+            is_codex = "device_auth_id" in d
+
             while True:
                 await asyncio.sleep(interval)
-                poll_data: dict[str, str] = {
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    "client_id": self.client_id,
-                }
-                # Codex uses 'device_auth_id', RFC 8628 uses 'device_code'
-                if "device_auth_id" in d:
-                    poll_data["device_auth_id"] = device_code
-                else:
-                    poll_data["device_code"] = device_code
-                if self.client_secret:
-                    poll_data["client_secret"] = self.client_secret
 
-                # Use form data (works for both Codex and RFC 8628)
-                poll = await client.post(self.token_url, data=poll_data)
+                if is_codex:
+                    # Codex: JSON body, minimal fields
+                    codex_poll = {
+                        "device_auth_id": device_code,
+                        "client_id": self.client_id,
+                    }
+                    poll = await client.post(
+                        self.token_url,
+                        json=codex_poll,
+                        headers={"Content-Type": "application/json"},
+                    )
+                else:
+                    # RFC 8628: form-encoded, full grant_type
+                    rfc_poll: dict[str, str] = {
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                        "device_code": device_code,
+                        "client_id": self.client_id,
+                    }
+                    if self.client_secret:
+                        rfc_poll["client_secret"] = self.client_secret
+                    poll = await client.post(self.token_url, data=rfc_poll)
+
                 body = poll.json()
                 if "access_token" in body:
                     tok = StoredToken(

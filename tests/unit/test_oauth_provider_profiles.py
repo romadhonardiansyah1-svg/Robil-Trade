@@ -124,14 +124,17 @@ class TestValidateProfile:
         issues = validate_profile(profile)
         assert any("token_url_env" in i for i in issues)
 
-    def test_disabled_unsupported_enabled_warns(self) -> None:
+    def test_subscription_oauth_without_device_url_warns(self) -> None:
+        """subscription_oauth tanpa device_auth_url wajib menghasilkan warning."""
+        from rtrade.llm.auth.provider_profiles import validate_provider_profile
+
         profile = OAuthProviderProfile(
             label="Bad",
             auth_mode="oauth2",
-            capability="disabled_unsupported",
+            capability="subscription_oauth",
             enabled=True,
             token_url_env="X",
             transport="HTTPS",
         )
-        issues = validate_profile(profile)
-        assert any("disabled_unsupported" in i for i in issues)
+        issues = validate_provider_profile("test_bad", profile)
+        assert any("device_auth_url" in i for i in issues)

@@ -172,10 +172,8 @@ class OAuth2Provider(CredentialProvider):
                 if self.client_secret:
                     poll_data["client_secret"] = self.client_secret
 
-                # Try JSON first (Codex), fallback to form
-                poll = await client.post(self.token_url, json=poll_data, headers=headers)
-                if poll.status_code >= 400:
-                    poll = await client.post(self.token_url, data=poll_data)
+                # Use form data (works for both Codex and RFC 8628)
+                poll = await client.post(self.token_url, data=poll_data)
                 body = poll.json()
                 if "access_token" in body:
                     tok = StoredToken(
@@ -188,11 +186,13 @@ class OAuth2Provider(CredentialProvider):
                     logger.info("device code login berhasil", provider=self._sid)
                     return tok
                 error = body.get("error", "")
-                if error == "slow_down":
+                # Codex error can be a dict or string
+                error_str = error if isinstance(error, str) else str(error)
+                if error_str == "slow_down":
                     interval += 5
                     continue
-                if error != "authorization_pending":
-                    raise RuntimeError(f"device login gagal: {body.get('error')}")
+                if error_str not in ("authorization_pending", ""):
+                    raise RuntimeError(f"device login gagal: {body}")
 
     # --- PKCE paste-URL support (O12) ---
 

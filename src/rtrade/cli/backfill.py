@@ -72,11 +72,35 @@ async def _run(symbol: str, timeframe: str, days: int, config_dir: str) -> None:
                 config=instrument.model_dump(mode="json"),
             )
             candle_repo = CandleRepo(session)
-            count = await ingest_candles(
-                provider, instrument, inst_row.id, tf, candle_repo, since=since
-            )
-            await session.commit()
-            logger.info("backfill completed", symbol=symbol, timeframe=timeframe, count=count)
+
+            # Pagination: fetch in batches of 500, advance `since` each time.
+            total = 0
+            batch_since = since
+            batch_num = 0
+            while batch_since < datetime.now(UTC):
+                batch_num += 1
+                count = await ingest_candles(
+                    provider, instrument, inst_row.id, tf, candle_repo, since=batch_since
+                )
+                await session.commit()
+                total += count
+                if count == 0:
+                    break
+                # Advance since past the last fetched candle.
+                # 500 candles × timeframe duration
+                td = timedelta(hours=1) if tf == Timeframe.H1 else timedelta(hours=4)
+                batch_since = batch_since + td * 499
+                logger.info(
+                    "backfill batch done",
+                    batch=batch_num,
+                    count=count,
+                    total=total,
+                    next_since=batch_since.isoformat(),
+                )
+                # Small pause to respect rate limits
+                await asyncio.sleep(2)
+
+            logger.info("backfill completed", symbol=symbol, timeframe=timeframe, total=total)
     finally:
         await provider.close()
         await redis_client.aclose()

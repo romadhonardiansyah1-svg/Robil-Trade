@@ -161,3 +161,26 @@ class TestEquityConfig:
     def test_equity_custom_value(self) -> None:
         risk = RiskSettings.model_validate({**VALID_RISK, "equity_usd": 25000})
         assert risk.equity_usd == 25000
+
+
+class TestMultiSlotKeys:
+    """A1: multi-slot API keys + keys_for()."""
+
+    def test_secrets_keys_for_returns_nonempty_in_slot_order(self) -> None:
+        s = Secrets(
+            gemini_api_key_1="AIzaAAA",
+            gemini_api_key_3="AIzaCCC",
+            anthropic_api_key_2="sk-ant-api-xxx",
+            xai_api_key_1="xai-111",
+        )
+        assert s.keys_for("gemini") == ["AIzaAAA", "AIzaCCC"]
+        assert s.keys_for("anthropic") == ["sk-ant-api-xxx"]
+        assert s.keys_for("openai") == []
+        assert s.keys_for("xai") == ["xai-111"]
+        assert s.keys_for("unknown") == []
+
+    def test_secrets_rejects_consumer_token_on_new_slots(self) -> None:
+        with pytest.raises(Exception, match="FORBIDDEN"):
+            Secrets(gemini_api_key_4="sk-ant-oat-xyz")
+        with pytest.raises(Exception, match="FORBIDDEN"):
+            Secrets(xai_api_key_2="sk-ant-oat-xyz")

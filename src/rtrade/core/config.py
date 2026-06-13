@@ -186,8 +186,18 @@ class Secrets(BaseSettings):
 
     gemini_api_key_1: str = ""
     gemini_api_key_2: str = ""
+    gemini_api_key_3: str = ""
+    gemini_api_key_4: str = ""
+    gemini_api_key_5: str = ""
     anthropic_api_key_1: str = ""
+    anthropic_api_key_2: str = ""
+    anthropic_api_key_3: str = ""
     openai_api_key_1: str = ""
+    openai_api_key_2: str = ""
+    openai_api_key_3: str = ""
+    xai_api_key_1: str = ""
+    xai_api_key_2: str = ""
+    xai_api_key_3: str = ""
     litellm_master_key: str = ""
     litellm_base_url: str = "http://localhost:4000"
 
@@ -201,22 +211,55 @@ class Secrets(BaseSettings):
     @field_validator(
         "gemini_api_key_1",
         "gemini_api_key_2",
+        "gemini_api_key_3",
+        "gemini_api_key_4",
+        "gemini_api_key_5",
         "anthropic_api_key_1",
+        "anthropic_api_key_2",
+        "anthropic_api_key_3",
         "openai_api_key_1",
+        "openai_api_key_2",
+        "openai_api_key_3",
+        "xai_api_key_1",
+        "xai_api_key_2",
+        "xai_api_key_3",
     )
     @classmethod
     def _reject_consumer_oauth(cls, v: str) -> str:
-        """PLAN §14.2: consumer-subscription OAuth tokens violate provider ToS.
-
-        Only official API keys are allowed anywhere in this system.
-        """
+        """Guard: Anthropic consumer-subscription OAuth tokens (sk-ant-oat) forbidden."""
         for prefix in _FORBIDDEN_KEY_PREFIXES:
             if v.startswith(prefix):
                 raise ValueError(
-                    f"consumer OAuth token ({prefix}...) is FORBIDDEN — it violates the "
-                    "provider's ToS. Use an official API key (PLAN §14.2)."
+                    f"consumer OAuth token ({prefix}...) is FORBIDDEN — use an official API key."
                 )
         return v
+
+    def keys_for(self, family: str) -> list[str]:
+        """Daftar API key non-kosong untuk satu family provider, urut slot.
+
+        family: "gemini" | "anthropic" | "openai" | "xai"
+        """
+        slots: dict[str, list[str]] = {
+            "gemini": [
+                self.gemini_api_key_1,
+                self.gemini_api_key_2,
+                self.gemini_api_key_3,
+                self.gemini_api_key_4,
+                self.gemini_api_key_5,
+            ],
+            "anthropic": [
+                self.anthropic_api_key_1,
+                self.anthropic_api_key_2,
+                self.anthropic_api_key_3,
+            ],
+            "openai": [
+                self.openai_api_key_1,
+                self.openai_api_key_2,
+                self.openai_api_key_3,
+            ],
+            "xai": [self.xai_api_key_1, self.xai_api_key_2, self.xai_api_key_3],
+        }
+        return [k for k in slots.get(family, []) if k]
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:

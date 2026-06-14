@@ -48,7 +48,7 @@ class AlertManager:
 
     DEFAULT_COOLDOWNS: ClassVar[dict[AlertType, timedelta]] = {
         AlertType.PROVIDER_DOWN: timedelta(minutes=30),
-        AlertType.SCAN_FAILED: timedelta(minutes=15),
+        AlertType.SCAN_FAILED: timedelta(hours=2),
         AlertType.BUDGET_ALERT: timedelta(hours=4),
         AlertType.DISK_ALERT: timedelta(hours=2),
         AlertType.SERVICE_UNHEALTHY: timedelta(minutes=15),
@@ -144,10 +144,16 @@ class AlertManager:
         )
 
     async def alert_scan_failed(self, instrument: str, error: str, consecutive: int) -> bool:
-        """Alert: scan failed 3x consecutively."""
+        """Alert: scan failed 3x consecutively. Rate limit errors suppressed."""
         key = f"scan:{instrument}"
         self._consecutive_failures[key] = consecutive
         if consecutive < 3:
+            return False
+
+        # Suppress rate limit errors — they are transient and self-resolving
+        error_lower = error.lower()
+        if "rate limit" in error_lower or "429" in error_lower:
+            logger.debug("rate limit scan failure suppressed", instrument=instrument)
             return False
 
         return await self.send_alert(

@@ -18,6 +18,7 @@ import structlog
 from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Timeframe
 from rtrade.scheduler.jobs import (
+    audit_chain_verify_job,
     calendar_sync_job,
     health_check_job,
     hmm_train_job,
@@ -26,6 +27,20 @@ from rtrade.scheduler.jobs import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def _has_calendar_source(cfg: AppConfig) -> bool:
+    """True bila setidaknya satu source kalender aktif dan buildable."""
+    for src in cfg.settings.calendar.sources:
+        if not src.enabled:
+            continue
+        if src.name == "finnhub":
+            if cfg.secrets.finnhub_api_key:
+                return True
+            continue  # finnhub without key → skip
+        if src.name in {"investing", "static_high_impact", "nasdaq", "trading_economics"}:
+            return True
+    return False
 
 
 def build_scan_schedules(
@@ -101,6 +116,15 @@ def create_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # P2-8: Audit chain integrity verification: weekly Sunday 03:00 UTC.
+    scheduler.add_job(
+        audit_chain_verify_job,
+        trigger=CronTrigger(day_of_week="sun", hour="3", minute="0", timezone="UTC"),
+        id="audit_chain_verify",
+        name="Audit chain verify",
+        replace_existing=True,
+    )
+
     return scheduler
 
 
@@ -118,6 +142,17 @@ async def run_worker() -> None:
         logger.critical("guardrail selftest FAILED — refusing to start", problems=problems)
         raise SystemExit(1)
     logger.info("guardrail selftest passed")
+
+    # FR-SCH-07: startup warning if no calendar source available.
+    cfg = AppConfig.load()
+    has_non_crypto = any(i.market.value != "crypto" for i in cfg.instruments)
+    if has_non_crypto and not _has_calendar_source(cfg):
+        if cfg.settings.calendar.fail_open_when_stale:
+            logger.warning(
+                "no calendar source; fail-open active — non-crypto akan trade buta terhadap berita"
+            )
+        else:
+            logger.critical("no calendar source; GR-07b akan REJECT SEMUA signal non-crypto")
 
     logger.info("starting Robil Trade worker")
 

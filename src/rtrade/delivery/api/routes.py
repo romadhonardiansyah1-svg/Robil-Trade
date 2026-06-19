@@ -72,14 +72,40 @@ _last_scan_time: float = 0.0
 
 @router.get("/health")
 async def health() -> dict[str, object]:
-    """Run system health checks."""
+    """Run system health checks + calendar source telemetry (P1-2)."""
     cfg = AppConfig.load()
     result = await HealthChecker(
         db_url=cfg.secrets.database_url,
         redis_url=cfg.secrets.redis_url,
         litellm_url="",  # library mode — no proxy (D2)
     ).run_all()
-    return result.to_dict()
+    out = result.to_dict()
+
+    # P1-2: calendar source health telemetry.
+    try:
+        from rtrade.persistence.repositories import CalendarSourceHealthRepo
+
+        engine = create_engine(cfg.secrets.database_url)
+        factory = create_session_factory(engine)
+        try:
+            async with factory() as session:
+                rows = await CalendarSourceHealthRepo(session).all()
+                out["calendar_sources"] = [
+                    {
+                        "source": r.source,
+                        "last_success": r.last_success.isoformat() if r.last_success else None,
+                        "last_error": r.last_error,
+                        "consecutive_failures": r.consecutive_failures,
+                        "last_attempt": r.last_attempt.isoformat() if r.last_attempt else None,
+                    }
+                    for r in rows
+                ]
+        finally:
+            await engine.dispose()
+    except Exception:
+        out["calendar_sources"] = []
+
+    return out
 
 
 @router.get("/signals")

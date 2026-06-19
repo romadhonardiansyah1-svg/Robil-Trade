@@ -153,3 +153,50 @@ async def hmm_train_job() -> None:
                 logger.info("hmm trained", symbol=inst.symbol)
     finally:
         await engine.dispose()
+
+
+async def audit_chain_verify_job() -> None:
+    """Periodic audit-chain integrity check (P2-8, S9).
+
+    Samples last 1000 audit rows, verifies hash chain. Alert on break.
+    """
+    from sqlalchemy import select
+
+    from rtrade.persistence.audit_chain import verify_chain
+    from rtrade.persistence.db import create_engine, create_session_factory
+    from rtrade.persistence.models import SignalAudit
+
+    logger.info("audit chain verify started")
+    cfg = AppConfig.load()
+    engine = create_engine(cfg.secrets.database_url)
+    session_factory = create_session_factory(engine)
+    try:
+        async with session_factory() as session:
+            result = await session.execute(
+                select(SignalAudit).order_by(SignalAudit.id.asc()).limit(1000)
+            )
+            rows = result.scalars().all()
+            entries = [
+                {
+                    "stage": r.stage,
+                    "ok": r.ok,
+                    "signal_id": r.signal_id,
+                    "detail": r.detail,
+                }
+                for r in rows
+            ]
+        ok, count_or_idx = verify_chain(entries)
+        if ok:
+            logger.info("audit chain verify PASSED", rows_checked=count_or_idx)
+        else:
+            logger.critical(
+                "audit chain BROKEN — tampering or corruption detected",
+                broken_at_index=count_or_idx,
+            )
+            await _send_failure_alert(
+                f"🚨 AUDIT CHAIN BROKEN at index {count_or_idx} — possible tampering!"
+            )
+    except Exception as exc:
+        logger.error("audit chain verify failed", error=str(exc))
+    finally:
+        await engine.dispose()

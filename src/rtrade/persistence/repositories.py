@@ -19,6 +19,7 @@ from rtrade.core.constants import Timeframe
 from rtrade.core.errors import DataValidationError
 from rtrade.core.timeutil import ensure_utc
 from rtrade.persistence.models import (
+    CalendarSourceHealth,
     Candle,
     EconomicEvent,
     Instrument,
@@ -389,3 +390,36 @@ class StrategyStateRepo:
             row.enabled = enabled
             row.disabled_reason = reason
             row.updated_at = utcnow()
+
+
+class CalendarSourceHealthRepo:
+    """Per-source calendar health persistence (FR-CAL-04)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def upsert(
+        self,
+        source: str,
+        *,
+        last_success: datetime | None,
+        last_error: str | None,
+        consecutive_failures: int,
+        last_attempt: datetime | None,
+    ) -> None:
+        existing = await self._session.get(CalendarSourceHealth, source)
+        if existing is None:
+            existing = CalendarSourceHealth(source=source)
+            self._session.add(existing)
+        existing.last_success = last_success
+        existing.last_error = last_error
+        existing.consecutive_failures = consecutive_failures
+        existing.last_attempt = last_attempt
+
+    async def all(self) -> list[CalendarSourceHealth]:
+        result = await self._session.execute(select(CalendarSourceHealth))
+        return list(result.scalars().all())
+
+    async def freshest_success(self) -> datetime | None:
+        result = await self._session.execute(select(func.max(CalendarSourceHealth.last_success)))
+        return result.scalar_one_or_none()

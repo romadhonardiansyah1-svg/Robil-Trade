@@ -50,6 +50,12 @@ llm:
   escalation_low: 0.48            # F5: doubt band lower
   escalation_high: 0.63           # F5: doubt band upper
   coroner_enabled: false          # T30: post-mortem SL analysis
+  # --- Budget guard (G-11) ---
+  budget:
+    max_tokens_per_scan: 20000
+    max_usd_per_day: 5.0
+    max_wall_seconds_per_scan: 45
+    max_steps_per_scan: 8
   # --- Credential pool (A6-A9) ---
   # Pool fallback dibangun OTOMATIS dari semua kredensial yang ada, urutan:
   #   1) API key family model analyst (slot 1..N), 2) API key family lain,
@@ -69,3 +75,12 @@ backtest:
     deflated_sharpe_prob: ">= 0.90"
     pbo_max: 0.30
     max_drawdown_pct: 25
+
+calendar:
+  fail_open_when_stale: false
+  stale_after_hours: 18
+  sync_lookback_days: 1
+  sync_lookforward_days: 7
+  sources:
+    - { name: investing, enabled: true }
+    - { name: static_high_impact, enabled: true }

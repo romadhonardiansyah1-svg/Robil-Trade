@@ -159,3 +159,21 @@ class BacktestRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
     )
+
+
+class CalendarSourceHealth(Base):
+    """Per-source metadata kalender (FR-CAL-04). last_success menggantikan
+    bug MAX(fetched_at) yang tidak maju saat sync over empty window."""
+
+    __tablename__ = "calendar_source_health"
+
+    source: Mapped[str] = mapped_column(Text, primary_key=True)
+    last_success: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_attempt: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=text("now()")
+    )

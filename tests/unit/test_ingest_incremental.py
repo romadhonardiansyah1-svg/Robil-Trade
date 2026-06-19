@@ -114,3 +114,26 @@ class TestIngestIncremental:
         assert call["limit"] == 10
         # watermark - 2 bars = 08:00 - 2h = 06:00
         assert call["since"] == datetime(2026, 6, 11, 6, 0, tzinfo=UTC)
+
+    @pytest.mark.asyncio
+    async def test_fresh_latest_candle_skips_provider_fetch(self) -> None:
+        from rtrade.pipeline.scan import _ingest_incremental
+
+        class FakeCandle:
+            ts = datetime(2026, 6, 11, 9, 0, tzinfo=UTC)
+
+        provider = FakeProvider()
+        repo = FakeRepo(latest_candle=FakeCandle())
+        now = datetime(2026, 6, 11, 10, 0, tzinfo=UTC)
+
+        count = await _ingest_incremental(
+            provider,
+            _make_instrument(),
+            1,
+            Timeframe.H1,
+            repo,
+            now,  # type: ignore[arg-type]
+        )
+
+        assert count == 0
+        assert provider.calls == []

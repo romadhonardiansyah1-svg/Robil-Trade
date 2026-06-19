@@ -208,11 +208,14 @@ class HealthChecker:
             )
 
     def check_disk(self) -> CheckResult:
-        """Check disk usage on the root partition."""
+        """Check disk usage on the process's root partition (host-correct)."""
+        import os
         import shutil
 
         try:
-            usage = shutil.disk_usage("/")
+            # G-07: os.sep is "/" on Linux/Docker, "\\" on Windows.
+            root = os.getenv("DISK_CHECK_PATH", os.sep)
+            usage = shutil.disk_usage(root)
             used_pct = (usage.used / usage.total) * 100
             free_gb = usage.free / (1024**3)
 

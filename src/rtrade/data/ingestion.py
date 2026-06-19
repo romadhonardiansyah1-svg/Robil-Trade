@@ -41,15 +41,16 @@ def candle_to_row(candle: Candle, instrument_id: int) -> CandleRow:
     )
 
 
-def detect_gaps(
+def detect_candle_gaps(
     candles: list[Candle],
     timeframe: Timeframe,
     *,
     is_crypto: bool = False,
     max_consecutive_gaps: int = 3,
 ) -> list[tuple[datetime, datetime]]:
-    """Detect gaps in candle data.
+    """Detect temporal gaps in candle data (data quality check).
 
+    NOT the same as fair-value gaps (indicators/structure.detect_gaps).
     For non-crypto instruments, weekend gaps are expected and excluded.
     Returns list of (gap_start, gap_end) tuples.
     """
@@ -84,6 +85,10 @@ def detect_gaps(
             gaps.append((candles[i - 1].ts, actual_ts))
 
     return gaps
+
+
+# Backwards-compatible alias (deprecated — use detect_candle_gaps).
+detect_gaps = detect_candle_gaps
 
 
 async def ingest_candles(

@@ -51,3 +51,7 @@ class AuditStage(StrEnum):
     GATE = "gate"
     DELIVERY = "delivery"
     REGIME_SHADOW = "regime_shadow"
+
+
+# W2: |0.05%|/8h — funding rate extreme threshold (P3-3: single source of truth).
+FUNDING_EXTREME_ABS: float = 0.0005

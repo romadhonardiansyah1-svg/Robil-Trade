@@ -14,11 +14,18 @@ import structlog
 import yaml
 
 from rtrade.core.config import AppConfig, InstrumentConfig
-from rtrade.core.constants import AuditStage, Market, SignalStatus, Timeframe
+from rtrade.core.constants import (
+    FUNDING_EXTREME_ABS,
+    AuditStage,
+    Market,
+    SignalStatus,
+    Timeframe,
+)
 from rtrade.core.errors import ConfigError, ProviderError
 from rtrade.core.timeutil import ensure_utc, timeframe_duration
-from rtrade.data.base import MarketDataProvider
+from rtrade.data.base import CalendarProvider, MarketDataProvider
 from rtrade.data.ccxt_provider import CcxtProvider
+from rtrade.data.composite_calendar import CompositeCalendarProvider
 from rtrade.data.finnhub_calendar import FinnhubCalendarProvider
 from rtrade.data.ingestion import ingest_candles
 from rtrade.data.ratelimit import RateLimiter
@@ -41,6 +48,7 @@ from rtrade.persistence.db import create_engine, create_session_factory
 from rtrade.persistence.models import DerivativesSnapshot, EconomicEvent, Signal
 from rtrade.persistence.repositories import (
     AuditRepo,
+    CalendarSourceHealthRepo,
     CandleRepo,
     EventRepo,
     InstrumentRepo,
@@ -87,9 +95,6 @@ def _build_llm_client(cfg: AppConfig) -> Any:
         credential_pool=_SCAN_POOL_CACHE,
     )
 
-
-# W2: |0.05%|/8h — funding rate extreme threshold.
-FUNDING_EXTREME_ABS = 0.0005
 
 # W8: HMM regime shadow cache.
 _HMM_CACHE: dict[str, Any] = {}
@@ -251,9 +256,14 @@ async def run_scan(
                 after_min=cfg.settings.risk.news_blackout_after_min,
             )
 
-            calendar_ts = await EventRepo(session).latest_fetch_ts()
+            # FR-CAL-04: pakai freshest source health (lebih akurat dari MAX(fetched_at)).
+            calendar_ts = await CalendarSourceHealthRepo(session).freshest_success()
+            if calendar_ts is None:
+                calendar_ts = await EventRepo(session).latest_fetch_ts()  # backwards-compat
+            stale_hours = cfg.settings.calendar.stale_after_hours
             calendar_stale = instrument.market != Market.CRYPTO and (
-                calendar_ts is None or (now - ensure_utc(calendar_ts)) > timedelta(hours=18)
+                calendar_ts is None
+                or (now - ensure_utc(calendar_ts)) > timedelta(hours=stale_hours)
             )
 
             live_price: float | None = None
@@ -370,26 +380,78 @@ async def run_scan(
         await engine.dispose()
 
 
+def _make_calendar_provider(name: str, cfg: AppConfig, limiter: RateLimiter) -> CalendarProvider:
+    """Factory source-agnostic berdasarkan nama config (FR-CAL-07)."""
+    if name == "investing":
+        from rtrade.data.investing_calendar import InvestingCalendarProvider
+
+        return InvestingCalendarProvider()
+    if name == "static_high_impact":
+        from rtrade.data.static_calendar import StaticCalendarProvider
+
+        return StaticCalendarProvider()
+    if name == "finnhub":
+        if not cfg.secrets.finnhub_api_key:
+            raise ConfigError("finnhub source enabled but FINNHUB_API_KEY empty")
+        return FinnhubCalendarProvider(cfg.secrets.finnhub_api_key, limiter)
+    if name == "nasdaq":
+        from rtrade.data.nasdaq_calendar import NasdaqCalendarProvider
+
+        return NasdaqCalendarProvider()
+    raise ConfigError(f"unknown calendar source: {name!r}")
+
+
+async def _calendar_alert(message: str) -> None:
+    """Inline alert callback untuk composite (re-point ke AlertManager di P2-5)."""
+    try:
+        from rtrade.scheduler.jobs import _send_failure_alert
+
+        await _send_failure_alert(message)
+    except Exception as exc:
+        logger.warning("calendar alert callback failed", error=str(exc))
+
+
 async def sync_calendar(
     *,
     config: AppConfig | None = None,
     config_dir: Path | str = Path("config"),
     env_file: Path | str | None = Path(".env"),
 ) -> int:
-    """Fetch and upsert economic calendar events."""
+    """Fetch and upsert economic calendar events via composite provider."""
     cfg = config or AppConfig.load(config_dir=config_dir, env_file=env_file)
-    if not cfg.secrets.finnhub_api_key:
-        raise ConfigError("FINNHUB_API_KEY is required for calendar sync")
 
     redis_client = aioredis.from_url(cfg.secrets.redis_url)
     limiter = RateLimiter(redis_client)
-    provider = FinnhubCalendarProvider(cfg.secrets.finnhub_api_key, limiter)
     engine = create_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
 
+    cal_cfg = cfg.settings.calendar
+    enabled = [s for s in cal_cfg.sources if s.enabled]
+    if not enabled:
+        raise ConfigError("no enabled calendar sources")
+
+    providers: list[CalendarProvider] = []
+    names: list[str] = []
+    for src in enabled:
+        try:
+            providers.append(_make_calendar_provider(src.name, cfg, limiter))
+            names.append(src.name)
+        except (NotImplementedError, ConfigError) as exc:
+            logger.warning(
+                "calendar source not available, skipping",
+                source=src.name,
+                error=str(exc),
+            )
+
+    if not providers:
+        raise ConfigError("no calendar sources could be built")
+
+    composite = CompositeCalendarProvider(providers, names=names, alert_callback=_calendar_alert)
     try:
         today = datetime.now(UTC).date()
-        events = await provider.fetch_events(today - timedelta(days=1), today + timedelta(days=7))
+        start = today - timedelta(days=cal_cfg.sync_lookback_days)
+        end = today + timedelta(days=cal_cfg.sync_lookforward_days)
+        events = await composite.fetch_events(start, end)
         orm_events = [
             EconomicEvent(
                 id=e.event_id,
@@ -406,10 +468,20 @@ async def sync_calendar(
         ]
         async with session_factory() as session:
             count = await EventRepo(session).upsert_many(orm_events)
+            # Persist per-source health.
+            health_repo = CalendarSourceHealthRepo(session)
+            for name, h in composite.health_snapshot().items():
+                await health_repo.upsert(
+                    name,
+                    last_success=h.last_success,
+                    last_error=h.last_error,
+                    consecutive_failures=h.consecutive_failures,
+                    last_attempt=h.last_attempt,
+                )
             await session.commit()
             return count
     finally:
-        await provider.close()
+        await composite.close()
         await redis_client.aclose()
         await engine.dispose()
 
@@ -816,6 +888,7 @@ async def _run_strategies(
             timeframe=candidate.timeframe,
             staleness_factor=cfg.settings.signal.candle_staleness_factor,
             live_price=live_price,
+            live_quote_required=True,  # G-09: fail-CLOSE if quote unavailable
             price_drift_max_pct=cfg.settings.signal.price_drift_max_pct,
             now=now,
             events=event_dicts,
@@ -966,11 +1039,24 @@ async def _run_strategies(
             sources = pres.sources or ["deterministic_pipeline"]
             llm_used = pres.llm_used
 
-        # F4: Signal grading.
+        # F4: Signal grading — wire edge quality score (G-05 fix).
+        from rtrade.signals.edge_quality import assess_edge_quality
+
+        edge_score: float | None = None
+        if cfg.settings.signal.edge_quality.enabled:
+            edge_report = assess_edge_quality(
+                df_1h,
+                candidate.action,
+                candidate.levels.entry_limit,
+                spread=spread,
+                config=edge_cfg,
+            )
+            edge_score = float(edge_report.score)
+
         grade_res = grade_signal(
             confluence_score=candidate.confluence_score,
             regime_match=True,
-            edge_quality_score=None,
+            edge_quality_score=edge_score,  # G-05: was None — now wired
             has_high_impact_event=high_impact_within(
                 event_dicts, instrument.related_currencies, now, hours=12
             ),

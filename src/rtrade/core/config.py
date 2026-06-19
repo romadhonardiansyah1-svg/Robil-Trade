@@ -35,6 +35,40 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class CalendarSourceConfig(_StrictModel):
+    """Satu sumber kalender dalam rantai composite (FR-CAL-07)."""
+
+    name: str  # "investing" | "nasdaq" | "trading_economics" | "static_high_impact" | "finnhub"
+    enabled: bool = True
+
+
+class CalendarSettings(_StrictModel):
+    """Konfigurasi lapisan kalender ekonomi (GR-07b dependency).
+
+    Default fail-CLOSE (fail_open_when_stale=false) — bot tidak pernah trade
+    buta terhadap berita. Mem-flip ke true WAJIB keputusan operator eksplisit
+    yang di-logging WARNING keras.
+    """
+
+    fail_open_when_stale: bool = False
+    stale_after_hours: float = Field(default=18.0, gt=0.0)
+    sync_lookback_days: int = Field(default=1, ge=0)
+    sync_lookforward_days: int = Field(default=7, ge=1)
+    sources: list[CalendarSourceConfig] = Field(
+        default_factory=lambda: [CalendarSourceConfig(name="static_high_impact", enabled=True)]
+    )
+
+    @field_validator("sources")
+    @classmethod
+    def _unique_source_names(cls, v: list[CalendarSourceConfig]) -> list[CalendarSourceConfig]:
+        names = [s.name for s in v]
+        if len(set(names)) != len(names):
+            raise ValueError(f"calendar.sources names must be unique, got {names}")
+        if not v:
+            raise ValueError("calendar.sources must not be empty (at least static_high_impact)")
+        return v
+
+
 class EdgeQualitySettings(_StrictModel):
     enabled: bool
     min_score: int = Field(ge=0, le=100)
@@ -88,6 +122,15 @@ class RiskSettings(_StrictModel):
         return self
 
 
+class LLMBudgetSettings(_StrictModel):
+    """4-cap LLM budget guard (FR-LLM-09/10/11, G-11)."""
+
+    max_tokens_per_scan: int = Field(default=20000, ge=1)
+    max_usd_per_day: float = Field(default=5.0, ge=0.01)
+    max_wall_seconds_per_scan: float = Field(default=45.0, ge=1.0)
+    max_steps_per_scan: int = Field(default=8, ge=1)
+
+
 class LLMSettings(_StrictModel):
     enabled: bool
     analyst_model: str = Field(min_length=1)
@@ -108,6 +151,8 @@ class LLMSettings(_StrictModel):
     default_auth_profile: str = Field(default="")
     auth_profiles: dict[str, Any] = Field(default_factory=dict)
     model_routes: dict[str, Any] = Field(default_factory=dict)
+    # --- Budget guard (G-11) ---
+    budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
 
 
 class WalkForwardSettings(_StrictModel):
@@ -135,6 +180,7 @@ class Settings(_StrictModel):
     risk: RiskSettings
     llm: LLMSettings
     backtest: BacktestSettings
+    calendar: CalendarSettings = Field(default_factory=CalendarSettings)
 
 
 class InstrumentConfig(_StrictModel):

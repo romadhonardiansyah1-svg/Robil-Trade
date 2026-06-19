@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-# Threshold: |funding rate| >= 0.05% per 8h is extreme
-FUNDING_EXTREME_ABS: float = 0.0005
+from rtrade.core.constants import FUNDING_EXTREME_ABS
 
 
 def is_funding_extreme(rate: float) -> bool:

@@ -45,6 +45,7 @@ def run_gate(
     timeframe: Timeframe = Timeframe.H1,
     staleness_factor: float = 2.0,
     live_price: float | None = None,
+    live_quote_required: bool = False,  # G-09: fail-CLOSE if True and quote unavailable
     price_drift_max_pct: float = 0.5,
     now: datetime | None = None,
     # GR-07: news
@@ -138,7 +139,15 @@ def run_gate(
             )
         )
 
-    if live_price is not None and price_drift_max_pct > 0:
+    # --- GR-06: Freshness + price drift (fail-CLOSE on missing required quote, G-09) ---
+    if live_quote_required and live_price is None:
+        failures.append(
+            GateFailure(
+                gate_id="GR-06",
+                reason="required live quote unavailable — fail-closed (abstain)",
+            )
+        )
+    elif live_price is not None and price_drift_max_pct > 0:
         drift_pct = abs(live_price - e) / e * 100
         if drift_pct > price_drift_max_pct:
             failures.append(

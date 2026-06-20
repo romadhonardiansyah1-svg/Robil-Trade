@@ -17,6 +17,8 @@ import structlog
 
 from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Timeframe
+from rtrade.monitoring.alerts import AlertManager
+from rtrade.scheduler import jobs
 from rtrade.scheduler.jobs import (
     audit_chain_verify_job_wrapped,
     calendar_sync_job_wrapped,
@@ -180,6 +182,19 @@ async def run_worker() -> None:
             raise SystemExit(1)
 
     logger.info("starting Robil Trade worker")
+
+    # P2-5 (A6): wire the process-scoped AlertManager so the live worker routes
+    # typed failure alerts through per-type cooldown dedup. Enabled only when both
+    # Telegram credentials are present; otherwise stay disabled (direct fallback).
+    if cfg.secrets.telegram_bot_token and cfg.secrets.telegram_chat_id:
+        jobs._alert_manager = AlertManager(
+            cfg.secrets.telegram_bot_token,
+            cfg.secrets.telegram_chat_id,
+            enabled=True,
+        )
+        logger.info("alert manager enabled (dedup path active)")
+    else:
+        logger.warning("alert manager disabled — telegram credentials missing")
 
     scheduler = create_scheduler()
     scheduler.start()

@@ -413,11 +413,12 @@ def _make_calendar_provider(name: str, cfg: AppConfig, limiter: RateLimiter) -> 
 
 
 async def _calendar_alert(message: str) -> None:
-    """Inline alert callback untuk composite (re-point ke AlertManager di P2-5)."""
+    """Inline alert callback untuk composite (route ke AlertManager via jobs, P2-5)."""
     try:
+        from rtrade.monitoring.alerts import AlertType
         from rtrade.scheduler.jobs import _send_failure_alert
 
-        await _send_failure_alert(message)
+        await _send_failure_alert(message, alert_type=AlertType.PROVIDER_DOWN)
     except Exception as exc:
         logger.warning("calendar alert callback failed", error=str(exc))
 

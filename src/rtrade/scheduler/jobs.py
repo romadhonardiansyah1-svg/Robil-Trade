@@ -19,6 +19,7 @@ import structlog
 
 from rtrade.core.config import AppConfig
 from rtrade.core.errors import RateLimitExceeded
+from rtrade.monitoring.alerts import AlertLevel, AlertManager, AlertType
 from rtrade.monitoring.healthcheck import HealthChecker
 from rtrade.pipeline import run_scan, sync_calendar, track_paper_signals
 
@@ -30,6 +31,18 @@ _ALERT_THRESHOLD = 3
 # F3: once-then-cooldown alert state — last alert timestamp per key.
 _last_alert_at: dict[str, datetime] = {}
 _ALERT_COOLDOWN = timedelta(hours=2)
+
+# P2-5 (A6): process-scoped AlertManager hook. When wired (live worker via
+# scheduler.main.run_worker), _send_failure_alert routes typed alerts through it
+# so per-type cooldown dedup applies. Left None in tests/CLI → direct fallback.
+_alert_manager: AlertManager | None = None
+
+# Severity per alert category for the AlertManager routing path.
+_ALERT_LEVELS: dict[AlertType, AlertLevel] = {
+    AlertType.SCAN_FAILED: AlertLevel.WARNING,
+    AlertType.PROVIDER_DOWN: AlertLevel.CRITICAL,
+    AlertType.SERVICE_UNHEALTHY: AlertLevel.CRITICAL,
+}
 
 
 async def scan_job(
@@ -77,8 +90,27 @@ async def scan_job(
                 _last_alert_at[key] = now
 
 
-async def _send_failure_alert(message: str) -> None:
-    """Best-effort alert to Telegram on repeated failures (F3)."""
+async def _send_failure_alert(message: str, *, alert_type: AlertType | None = None) -> None:
+    """Best-effort alert to Telegram on repeated failures (F3).
+
+    P2-5 (A6): when a process-scoped AlertManager is wired (live worker) AND an
+    ``alert_type`` is supplied, route through it so per-type cooldown dedup
+    applies. Otherwise (no manager, or no type — e.g. the scan_job call which
+    owns its own cooldown) fall back to the original direct one-shot
+    TelegramDelivery, leaving existing behavior and tests unchanged.
+    """
+    manager = _alert_manager
+    if manager is not None and alert_type is not None:
+        try:
+            await manager.send_alert(
+                alert_type,
+                _ALERT_LEVELS.get(alert_type, AlertLevel.WARNING),
+                alert_type.value,
+                message,
+            )
+        except Exception:
+            logger.exception("failed to send failure alert")
+        return
     try:
         cfg = AppConfig.load()
         if cfg.secrets.telegram_bot_token and cfg.secrets.telegram_chat_id:
@@ -226,7 +258,8 @@ async def audit_chain_verify_job() -> None:
                 broken_at_index=count_or_idx,
             )
             await _send_failure_alert(
-                f"🚨 AUDIT CHAIN BROKEN at index {count_or_idx} — possible tampering!"
+                f"🚨 AUDIT CHAIN BROKEN at index {count_or_idx} — possible tampering!",
+                alert_type=AlertType.SERVICE_UNHEALTHY,
             )
     except Exception as exc:
         logger.error("audit chain verify failed", error=str(exc))

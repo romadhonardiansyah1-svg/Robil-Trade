@@ -5,10 +5,7 @@ based on the first positional argument (``argv[1]``). The remaining args are
 forwarded to the chosen subcommand's own argparse entry by rewriting
 ``sys.argv`` so each subcommand sees a sensible ``prog`` plus its own args.
 
-Valid subcommands: ``auth``, ``backfill``, ``bot``.
-
-Note: ``backtest`` is intentionally omitted — ``src/rtrade/cli/backtest.py``
-does not exist yet and is tracked as a separate unfinished item.
+Valid subcommands: ``auth``, ``backfill``, ``bot``, ``backtest``.
 """
 
 from __future__ import annotations
@@ -24,6 +21,7 @@ commands:
   auth      OAuth auth management (login, status, providers, ...)
   backfill  Backfill candle data for an instrument x timeframe
   bot       Run the Telegram delivery bot (polling mode)
+  backtest  Run the go-live statistical gate runner (walk-forward + gates)
 
 Run `rtrade <command> --help` for command-specific options.
 """
@@ -43,6 +41,14 @@ def _run_backfill() -> None:
     backfill_main()
 
 
+def _run_backtest() -> None:
+    # `backtest.main()` parses sys.argv via argparse and raises SystemExit
+    # with the go-live gate code (0 pass / non-zero fail).
+    from rtrade.cli.backtest import main as backtest_main
+
+    backtest_main()
+
+
 def _run_bot() -> None:
     # `bot.main()` is a coroutine — run it on a fresh event loop.
     from rtrade.cli.bot import main as bot_main
@@ -53,6 +59,7 @@ def _run_bot() -> None:
 _COMMANDS: dict[str, Callable[[], None]] = {
     "auth": _run_auth,
     "backfill": _run_backfill,
+    "backtest": _run_backtest,
     "bot": _run_bot,
 }
 

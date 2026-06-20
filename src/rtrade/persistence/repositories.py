@@ -7,7 +7,7 @@ Transaction control (commit/rollback) belongs to the caller.
 """
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -19,6 +19,7 @@ from rtrade.core.constants import Timeframe
 from rtrade.core.errors import DataValidationError
 from rtrade.core.timeutil import ensure_utc
 from rtrade.persistence.models import (
+    BacktestRun,
     CalendarSourceHealth,
     Candle,
     EconomicEvent,
@@ -451,3 +452,41 @@ class CalendarSourceHealthRepo:
     async def freshest_success(self) -> datetime | None:
         result = await self._session.execute(select(func.max(CalendarSourceHealth.last_success)))
         return result.scalar_one_or_none()
+
+
+class BacktestRunRepo:
+    """Persistence for go-live backtest gate runs (P1-6, FR-BT-05, ADR-A07)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def add(
+        self,
+        *,
+        strategy: str,
+        instrument: str,
+        window_start: date,
+        window_end: date,
+        is_oos: bool,
+        metrics: dict[str, Any],
+        gates: dict[str, Any],
+        params: dict[str, Any],
+    ) -> BacktestRun:
+        row = BacktestRun(
+            strategy=strategy,
+            instrument=instrument,
+            window_start=window_start,
+            window_end=window_end,
+            is_oos=is_oos,
+            metrics=metrics,
+            gates=gates,
+            params=params,
+        )
+        self._session.add(row)
+        await self._session.flush()  # populate .id
+        return row
+
+    async def recent(self, limit: int = 5) -> list[BacktestRun]:
+        stmt = select(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())

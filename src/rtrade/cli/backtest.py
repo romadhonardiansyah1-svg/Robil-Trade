@@ -25,7 +25,7 @@ import pandas as pd
 import structlog
 import yaml
 
-from rtrade.backtest.costs import load_cost_models
+from rtrade.backtest.costs import get_cost_model
 from rtrade.backtest.harness import run_walkforward_harness
 from rtrade.backtest.metrics import BacktestMetrics
 from rtrade.backtest.validation import ValidationGateResult, run_validation_gates
@@ -176,7 +176,11 @@ async def _run(args: argparse.Namespace, cfg: AppConfig) -> int:
     df = _build_df(candles)
     strategy = strategy_cls()
     strategy_cfg = _load_strategy_config(args.strategy)
-    cost_model = load_cost_models().get(args.symbol)
+    try:
+        cost_model = get_cost_model(args.symbol)
+    except ConfigError as exc:
+        _err(f"ERROR: {exc}")
+        return 2
     wf_cfg = cfg.settings.backtest.walkforward
 
     wf = run_walkforward_harness(

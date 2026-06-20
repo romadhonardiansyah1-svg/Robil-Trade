@@ -96,6 +96,10 @@ class SignalSettings(_StrictModel):
     max_signals_per_day_per_instrument: int = Field(ge=1)
     price_drift_max_pct: float = Field(gt=0.0)
     candle_staleness_factor: float = Field(ge=1.0)
+    # P1-7 (G-07): full warmup window required before a scan may emit a signal.
+    # Until this many bars exist the scan abstains ("abstain_warmup") instead of
+    # acting on under-warmed indicators/regime. Floor 200 keeps the legacy minimum.
+    warmup_bars: int = Field(default=500, ge=200)
     edge_quality: EdgeQualitySettings
 
 

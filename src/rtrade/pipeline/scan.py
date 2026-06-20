@@ -159,13 +159,35 @@ async def _ingest_incremental(
         return 0
     if latest is None:
         since = now - timedelta(days=120)
-        limit = 500
+        # P1-7 (FR-DATA-09): cold start must backfill a full warmup window, not a
+        # token page. 5000 is the TwelveData per-request ceiling; steady-state
+        # incremental fetches below stay tiny (limit=10).
+        limit = 5000
     else:
         since = ensure_utc(latest.ts) - 2 * timeframe_duration(tf)
         limit = 10
     return await ingest_candles(
         provider, instrument, instrument_id, tf, repo, since=since, limit=limit
     )
+
+
+def _warmup_deficit(
+    *, bars_1h: int, bars_4h: int, has_4h: bool, warmup_bars: int
+) -> dict[str, int] | None:
+    """P1-7 (G-07): decide whether a scan is still under its warmup window.
+
+    Pure decision helper so the cold-start safety property can be verified
+    deterministically. Returns the abstain detail when under-warmed (1h checked
+    first), or ``None`` once a full warmup window is held on every required
+    timeframe. Behaviour for a fully warmed instrument is unchanged: with the
+    default ``warmup_bars`` the steady-state load (500 closed bars) clears both
+    checks exactly as before.
+    """
+    if bars_1h < warmup_bars:
+        return {"bars_1h": bars_1h, "required": warmup_bars}
+    if has_4h and bars_4h < warmup_bars:
+        return {"bars_4h": bars_4h, "required": warmup_bars}
+    return None
 
 
 async def run_scan(
@@ -222,16 +244,24 @@ async def run_scan(
                     await _ingest_incremental(
                         provider, instrument, inst_row.id, Timeframe.H4, candle_repo, now
                     )
-            df_1h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H1, 500))
-            df_4h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H4, 500))
+            warmup_bars = cfg.settings.signal.warmup_bars
+            load_n = max(500, warmup_bars)
+            df_1h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H1, load_n))
+            df_4h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H4, load_n))
 
-            if len(df_1h) < 200:
+            deficit = _warmup_deficit(
+                bars_1h=len(df_1h),
+                bars_4h=len(df_4h),
+                has_4h=Timeframe.H4 in instrument.timeframes,
+                warmup_bars=warmup_bars,
+            )
+            if deficit is not None:
                 await session.commit()
                 return ScanResult(
                     symbol=symbol,
                     timeframe=tf.value,
-                    status="insufficient_data",
-                    detail={"candles_1h": len(df_1h)},
+                    status="abstain_warmup",
+                    detail=deficit,
                 )
 
             df_1h = await asyncio.to_thread(compute_indicators, df_1h)

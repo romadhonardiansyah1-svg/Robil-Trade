@@ -85,7 +85,8 @@ class TestIngestIncremental:
 
         assert len(provider.calls) == 1
         call = provider.calls[0]
-        assert call["limit"] == 500
+        # P1-7 (FR-DATA-09): cold start backfills a full warmup window in one call.
+        assert call["limit"] == 5000
         delta = abs((now - timedelta(days=120)) - call["since"])
         assert delta < timedelta(minutes=1)
 

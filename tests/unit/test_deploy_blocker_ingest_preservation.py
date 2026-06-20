@@ -9,7 +9,7 @@ MUST NOT regress. Written observation-first: assertions mirror behavior observed
 on the current code.
 
 Scope (from design.md Preservation Requirements / bugfix.md 3.7-3.11):
-  - First-run ingestion backfills (since = now - 120 days, limit = 500, one call).
+  - First-run ingestion backfills (since = now - 120 days, limit = 5000, one call).
   - Stale-watermark ingestion fetches incremental (since = watermark - 2 bars,
     limit = 10, one call).
   - Calendar parsing / impact normalization / 429 handling are functionally
@@ -117,7 +117,7 @@ def _make_instrument() -> InstrumentConfig:
 
 @pytest.mark.asyncio
 async def test_first_run_backfills_120_days_one_call() -> None:
-    """latest is None => one provider call, limit=500, since ~= now - 120 days."""
+    """latest is None => one provider call, limit=5000, since ~= now - 120 days."""
     from rtrade.pipeline.scan import _ingest_incremental
 
     provider = _FakeProvider()
@@ -134,7 +134,8 @@ async def test_first_run_backfills_120_days_one_call() -> None:
 
     assert len(provider.calls) == 1
     call = provider.calls[0]
-    assert call["limit"] == 500
+    # P1-7 (FR-DATA-09): cold start backfills a full warmup window in one call.
+    assert call["limit"] == 5000
     assert abs((_NOW - timedelta(days=120)) - call["since"]) < timedelta(minutes=1)
 
 

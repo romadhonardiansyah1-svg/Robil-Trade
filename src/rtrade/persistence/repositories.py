@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -363,6 +363,14 @@ class SignalRepo:
 
 
 class AuditRepo:
+    # D1: transaction-scoped advisory-lock key that serializes hash-chain
+    # appends. The constant is the ASCII bytes of "RTRA" (0x52='R', 0x54='T',
+    # 0x52='R', 0x41='A') read as a signed 32-bit int — a small, fixed,
+    # documented value dedicated to the rtrade audit chain. pg_advisory_xact_lock
+    # accepts a bigint, so this is well within range and collision-free for our
+    # single use.
+    _CHAIN_LOCK_KEY = 0x52545241
+
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -374,8 +382,24 @@ class AuditRepo:
         detail: dict[str, Any],
         signal_id: str | None = None,
     ) -> None:
-        # S9: hash chain — get prev_hash from last audit row
+        # S9: hash chain — get prev_hash from last audit row.
         from rtrade.persistence.audit_chain import build_chain_entry
+
+        # D1: serialize chain appends. Take a Postgres transaction-scoped
+        # advisory lock BEFORE the read-then-insert so only one appender runs
+        # the read→insert critical section at a time. The lock auto-releases at
+        # COMMIT/ROLLBACK, so it is held for the remainder of the caller's
+        # transaction — correct because the INSERT must be committed before the
+        # lock releases for the next appender to observe the new chain head.
+        # This relies on the caller's read+insert+COMMIT occurring in the same
+        # transaction (the commit boundary is what makes the serialization
+        # correct). Without the lock, concurrent tasks sharing the event loop
+        # and DB could read the SAME latest row and chain two rows off the same
+        # prev_hash, forking the chain.
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": self._CHAIN_LOCK_KEY},
+        )
 
         prev_hash = "genesis"
         last = await self._session.execute(
@@ -387,8 +411,11 @@ class AuditRepo:
             prev_hash = chain.get("row_hash", "genesis")
 
         chain_entry = build_chain_entry(prev_hash, stage, ok, signal_id, detail)
-        detail["_chain"] = chain_entry
-        self._session.add(SignalAudit(signal_id=signal_id, stage=stage, ok=ok, detail=detail))
+        # D5 (Low): build the stored dict without mutating the caller's input.
+        stored_detail = {**detail, "_chain": chain_entry}
+        self._session.add(
+            SignalAudit(signal_id=signal_id, stage=stage, ok=ok, detail=stored_detail)
+        )
 
 
 class StrategyStateRepo:

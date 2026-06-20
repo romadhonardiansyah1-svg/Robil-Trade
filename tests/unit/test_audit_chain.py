@@ -71,3 +71,66 @@ class TestAuditChain:
         ok, count = verify_chain(entries)
         assert ok is True
         assert count == 1
+
+
+class _FakeResult:
+    """Minimal SQLAlchemy Result stand-in for the latest-row SELECT."""
+
+    def scalar_one_or_none(self) -> None:
+        return None
+
+
+class _RecordingSession:
+    """Fake AsyncSession that records the order of execute() statements.
+
+    Lets us prove (without a live DB) that AuditRepo.add takes the advisory
+    lock BEFORE it reads the latest audit row — i.e. the serialization is
+    wired correctly (D1).
+    """
+
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+        self.added: list[object] = []
+
+    async def execute(self, statement: object, params: object = None) -> _FakeResult:
+        self.executed.append(str(statement))
+        return _FakeResult()
+
+    def add(self, obj: object) -> None:
+        self.added.append(obj)
+
+
+class TestAuditRepoSerialization:
+    """D1: chain appends must be serialized with a transaction-scoped lock."""
+
+    async def test_advisory_lock_issued_before_latest_select(self) -> None:
+        from rtrade.persistence.repositories import AuditRepo
+
+        session = _RecordingSession()
+        repo = AuditRepo(session)  # type: ignore[arg-type]
+
+        await repo.add(stage="candidate", ok=True, detail={"x": 1}, signal_id="sig1")
+
+        # First statement must be the advisory lock.
+        assert session.executed, "AuditRepo.add issued no statements"
+        assert "pg_advisory_xact_lock" in session.executed[0]
+
+        # The latest-row SELECT must come strictly after the lock.
+        lock_idx = next(i for i, s in enumerate(session.executed) if "pg_advisory_xact_lock" in s)
+        select_idx = next(i for i, s in enumerate(session.executed) if "signal_audits" in s)
+        assert lock_idx < select_idx, (
+            "advisory lock must precede the latest-row SELECT (serialize before read)"
+        )
+
+    async def test_add_does_not_mutate_caller_detail(self) -> None:
+        from rtrade.persistence.repositories import AuditRepo
+
+        session = _RecordingSession()
+        repo = AuditRepo(session)  # type: ignore[arg-type]
+
+        caller_detail: dict = {"x": 1}
+        await repo.add(stage="candidate", ok=True, detail=caller_detail, signal_id="sig1")
+
+        # Caller's dict must be left untouched (no injected _chain key).
+        assert caller_detail == {"x": 1}
+        assert "_chain" not in caller_detail

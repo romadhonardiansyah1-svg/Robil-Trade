@@ -1044,6 +1044,72 @@ async def _run_strategies(
                         "confidence": pres.confidence,
                     },
                 )
+
+            # C2 / P1-3: SECOND gate after the LLM pipeline ("post_llm").
+            # Exercises GR-09 (confidence floor), GR-10 (no LLM number-mutation) and
+            # GR-11 (citations) at runtime — these are skipped by the deterministic
+            # first gate because confidence/original_candidate/sources/pack_source_ids
+            # are omitted there. Re-passes every deterministic gate arg so this is a
+            # full 13-gate run on the PUBLISH path. Only reached when llm.enabled.
+            post_llm_gate = run_gate(
+                candidate,
+                latest_candle_ts=candidate.bar_ts,
+                timeframe=candidate.timeframe,
+                staleness_factor=cfg.settings.signal.candle_staleness_factor,
+                live_price=live_price,
+                live_quote_required=True,  # G-09: fail-CLOSE if quote unavailable
+                price_drift_max_pct=cfg.settings.signal.price_drift_max_pct,
+                now=now,
+                events=event_dicts,
+                related_currencies=instrument.related_currencies,
+                news_blackout_before_min=cfg.settings.risk.news_blackout_before_min,
+                news_blackout_after_min=cfg.settings.risk.news_blackout_after_min,
+                calendar_stale=calendar_stale,
+                regime=regime.regime,
+                required_regime=strategy.required_regime,
+                signals_today=signals_today,
+                max_signals_per_day=cfg.settings.signal.max_signals_per_day_per_instrument,
+                paper_outcomes=paper_outcomes,
+                expectancy_window=cfg.settings.risk.expectancy_guard_window,
+                # --- P2 additions (only meaningful post-LLM) ---
+                confidence=float(pres.confidence),
+                confidence_min=cfg.settings.signal.confidence_min,
+                # GR-10: frozen pre-LLM candidate. Vacuous today (deterministic
+                # candidate isn't mutated by the LLM) but durable vs future paths.
+                original_candidate=candidate,
+                sources=pres.sources or ["deterministic_pipeline"],
+                pack_source_ids=set(pack.source_ids) if pack is not None else set(),
+            )
+            await audit_repo.add(
+                stage=AuditStage.GATE.value,
+                ok=post_llm_gate.passed,
+                signal_id=candidate.candidate_id,
+                detail={
+                    "phase": "post_llm",
+                    "failures": [f"{f.gate_id}: {f.reason}" for f in post_llm_gate.failures],
+                },
+            )
+            if not post_llm_gate.passed:
+                await session_repo.add(
+                    _signal_model(
+                        candidate,
+                        instrument_id,
+                        status=SignalStatus.REJECTED,
+                        confidence=Decimal("0"),
+                        payload={
+                            "candidate": candidate.model_dump(mode="json"),
+                            "gate_post_llm": post_llm_gate.model_dump(mode="json"),
+                        },
+                    )
+                )
+                return ScanResult(
+                    symbol=instrument.symbol,
+                    timeframe=candidate.timeframe.value,
+                    status="rejected",
+                    signal_id=candidate.candidate_id,
+                    failures=[f"{f.gate_id}: {f.reason}" for f in post_llm_gate.failures],
+                )
+
             confidence = Decimal(str(pres.confidence))
             rationale = pres.rationale
             key_risks = pres.key_risks or key_risks

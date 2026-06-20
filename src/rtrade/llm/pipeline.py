@@ -21,6 +21,7 @@ import structlog
 
 from rtrade.core.errors import LLMOutputError, LLMUnavailableError
 from rtrade.llm.analyst import run_analyst
+from rtrade.llm.budget_guard import BudgetGuard, BudgetState, BudgetStopReason
 from rtrade.llm.client import LLMClient
 from rtrade.llm.context_pack import ContextPack
 from rtrade.llm.critic import run_critic
@@ -60,6 +61,11 @@ class PipelineResult:
     review: CriticReview | None = None
     verifier_report: VerifierReport | None = None
     pipeline_latency_ms: float = 0.0
+
+    # Budget guard (G-11): set when a per-scan cap was breached and the
+    # pipeline aborted early. None when budgets were never exceeded (or when
+    # no BudgetGuard was supplied, e.g. tests/dormant llm.enabled=false).
+    budget_stop: BudgetStopReason | None = None
 
 
 def compute_confidence(
@@ -101,6 +107,8 @@ async def run_llm_pipeline(
     deterministic_fallback_threshold: int = 75,
     analyst_model: str = "gemini/gemini-3.1-flash-lite",
     critic_model: str = "gemini/gemini-3.1-flash-lite",
+    budget_guard: BudgetGuard | None = None,
+    budget_state: BudgetState | None = None,
 ) -> PipelineResult:
     """Run the full LLM pipeline on a signal candidate.
 
@@ -113,6 +121,17 @@ async def run_llm_pipeline(
             confluence >= this, publish as deterministic-only.
         analyst_model: Model to use for the Analyst agent.
         critic_model: Model to use for the Critic agent.
+        budget_guard: Optional per-scan budget guard (G-11). When provided,
+            token/USD/wall-clock/step caps are enforced after each model
+            invocation; on breach the pipeline aborts cleanly (FALLBACK if
+            confluence >= threshold else ABSTAIN). When ``None`` the pipeline
+            behaves exactly as before (no enforcement) — this keeps existing
+            callers/tests unchanged and is the dormant path while
+            ``llm.enabled`` is false.
+        budget_state: Optional pre-built per-scan budget state. Allows a caller
+            to share one state across the initial call and a flagship
+            escalation so caps accumulate across the whole scan. Created from
+            ``budget_guard`` when omitted.
 
     Returns:
         PipelineResult with decision, confidence, and audit data.
@@ -122,14 +141,32 @@ async def run_llm_pipeline(
     review: CriticReview | None = None
     verifier_report: VerifierReport | None = None
 
+    # Budget guard setup (G-11). Enforcement is active only when a guard is
+    # supplied; otherwise every budget hook below is a no-op.
+    if budget_guard is not None and budget_state is None:
+        budget_state = budget_guard.start_scan()
+    alerted_80pct = False
+
     try:
         # Step 1: Analyst.
+        tokens_before, usd_before = _usage_snapshot(client)
         assessment = await run_analyst(client, pack, model=analyst_model)
+        if budget_guard is not None and budget_state is not None:
+            reason = _record_usage(budget_guard, budget_state, client, tokens_before, usd_before)
+            alerted_80pct = _maybe_alert_80pct(budget_guard, budget_state, alerted_80pct)
+            if reason is not None:
+                return _budget_abort(candidate, reason, deterministic_fallback_threshold, start)
 
         # Step 2: Critic.
+        tokens_before, usd_before = _usage_snapshot(client)
         review = await run_critic(client, pack, assessment, model=critic_model)
+        if budget_guard is not None and budget_state is not None:
+            reason = _record_usage(budget_guard, budget_state, client, tokens_before, usd_before)
+            alerted_80pct = _maybe_alert_80pct(budget_guard, budget_state, alerted_80pct)
+            if reason is not None:
+                return _budget_abort(candidate, reason, deterministic_fallback_threshold, start)
 
-        # Step 3: Verifier (deterministic).
+        # Step 3: Verifier (deterministic -- no model call, so no budget record).
         verifier_report = verify(pack, assessment, review)
 
     except (LLMOutputError, LLMUnavailableError) as exc:
@@ -286,6 +323,88 @@ async def run_llm_pipeline(
         review=review,
         verifier_report=verifier_report,
         pipeline_latency_ms=latency,
+    )
+
+
+def _usage_snapshot(client: LLMClient) -> tuple[int, float]:
+    """Snapshot cumulative (tokens, usd) from the client for delta accounting."""
+    stats = client.stats
+    return int(stats["total_tokens"]), float(stats["total_cost_usd"])
+
+
+def _record_usage(
+    guard: BudgetGuard,
+    state: BudgetState,
+    client: LLMClient,
+    tokens_before: int,
+    usd_before: float,
+) -> BudgetStopReason | None:
+    """Record the cost of the last model invocation against the budget.
+
+    Tokens/USD are sourced from the LLM client's cumulative stats (populated
+    per call in ``LLMClient._attempt_loop`` from litellm usage + cost_per_token).
+    We feed the *delta* since the pre-call snapshot so each step is charged
+    exactly once. ``steps`` is always 1 per model invocation.
+    """
+    tokens_after, usd_after = _usage_snapshot(client)
+    return guard.record(
+        state,
+        tokens=max(0, tokens_after - tokens_before),
+        usd=max(0.0, usd_after - usd_before),
+        steps=1,
+    )
+
+
+def _maybe_alert_80pct(guard: BudgetGuard, state: BudgetState, alerted: bool) -> bool:
+    """Emit a best-effort one-shot warning when daily USD crosses 80%.
+
+    Returns the updated ``alerted`` flag. Dedup is per-pipeline-run (best
+    effort, non-fatal); cross-scan dedup is intentionally out of scope.
+    """
+    if not alerted and guard.at_80pct_daily(state):
+        logger.warning("llm budget at 80% of daily cap", day_usd=state.day_usd)
+        return True
+    return alerted
+
+
+def _budget_abort(
+    candidate: SignalCandidate,
+    reason: BudgetStopReason,
+    deterministic_fallback_threshold: int,
+    start: float,
+) -> PipelineResult:
+    """Abort the pipeline on a budget breach (G-11).
+
+    Per plan P2-4: FALLBACK (deterministic-only) when confluence is high
+    enough to publish without the LLM, otherwise ABSTAIN. No further model
+    calls are made. The breached cap is recorded in ``budget_stop`` for audit.
+    """
+    latency = (time.monotonic() - start) * 1000
+    logger.warning(
+        "llm pipeline aborted on budget stop",
+        reason=reason,
+        confluence=candidate.confluence_score,
+    )
+    if candidate.confluence_score >= deterministic_fallback_threshold:
+        return PipelineResult(
+            decision=PipelineDecision.FALLBACK,
+            confidence=candidate.confluence_score / 100.0,
+            rationale=_deterministic_rationale(candidate),
+            key_risks=[f"LLM budget stop ({reason}) - deterministic-only signal"],
+            sources=[],
+            llm_used=False,
+            pipeline_latency_ms=latency,
+            budget_stop=reason,
+        )
+    return PipelineResult(
+        decision=PipelineDecision.ABSTAIN,
+        confidence=0.0,
+        rationale=f"LLM budget stop ({reason})",
+        key_risks=[],
+        sources=[],
+        llm_used=False,
+        pipeline_latency_ms=latency,
+        budget_stop=reason,
     )
 
 

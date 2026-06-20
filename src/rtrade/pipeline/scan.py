@@ -36,6 +36,7 @@ from rtrade.guardrails.gate import run_gate
 from rtrade.indicators.engine import compute as compute_indicators
 from rtrade.indicators.engine import snapshot as indicator_snapshot
 from rtrade.indicators.structure import cluster_sr_levels, detect_gaps, detect_swing_points
+from rtrade.llm.budget_guard import BudgetGuard
 from rtrade.llm.cascade import should_escalate
 from rtrade.llm.context_pack import ContextPack, build_context_pack
 from rtrade.llm.model_router import resolve_role_model
@@ -992,6 +993,11 @@ async def _run_strategies(
             )
             client = _build_llm_client(cfg)
             flagship_model = resolve_role_model(cfg, "flagship")
+            # G-11 (P2-4): per-scan budget guard. One state is shared across
+            # the initial call and any flagship escalation so token/USD/wall/
+            # step caps accumulate over the whole scan's LLM work.
+            budget_guard = BudgetGuard(cfg.settings.llm.budget)
+            budget_state = budget_guard.start_scan()
             pres = await run_llm_pipeline(
                 candidate,
                 pack,
@@ -999,6 +1005,8 @@ async def _run_strategies(
                 confidence_min=cfg.settings.signal.confidence_min,
                 analyst_model=resolve_role_model(cfg, "analyst"),
                 critic_model=resolve_role_model(cfg, "critic"),
+                budget_guard=budget_guard,
+                budget_state=budget_state,
             )
             # F5: Cascade escalation on doubt band.
             if should_escalate(
@@ -1015,6 +1023,8 @@ async def _run_strategies(
                     confidence_min=cfg.settings.signal.confidence_min,
                     analyst_model=flagship_model,
                     critic_model=flagship_model,
+                    budget_guard=budget_guard,
+                    budget_state=budget_state,
                 )
             status = _status_for_decision(pres.decision)
             if status != SignalStatus.PUBLISHED:

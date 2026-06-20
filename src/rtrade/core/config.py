@@ -329,6 +329,11 @@ class Secrets(BaseSettings):
     telegram_chat_id: str = ""
     api_auth_token: str = ""
 
+    # C3: keyed-HMAC secret for ML model integrity (save/load). REQUIRED for any
+    # model save or load — model_io fails CLOSED when this is unset (no plain-hash
+    # fallback). Never commit a value; set it only in the deployed .env.
+    model_hmac_key: str = ""
+
     env: Literal["dev", "prod"] = "dev"
     log_level: str = "INFO"
 

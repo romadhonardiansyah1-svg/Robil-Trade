@@ -212,7 +212,11 @@ async def hmm_train_job() -> None:
 
             out = Path("models")
             out.mkdir(exist_ok=True)
-            save_model(detector, out / f"hmm_{inst.symbol}.joblib")
+            save_model(
+                detector,
+                out / f"hmm_{inst.symbol}.joblib",
+                hmac_key=cfg.secrets.model_hmac_key,
+            )
             logger.info("hmm trained", symbol=inst.symbol)
 
 

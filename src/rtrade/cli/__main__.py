@@ -5,7 +5,7 @@ based on the first positional argument (``argv[1]``). The remaining args are
 forwarded to the chosen subcommand's own argparse entry by rewriting
 ``sys.argv`` so each subcommand sees a sensible ``prog`` plus its own args.
 
-Valid subcommands: ``auth``, ``backfill``, ``bot``, ``backtest``.
+Valid subcommands: ``auth``, ``backfill``, ``bot``, ``backtest``, ``promote``.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ commands:
   backfill  Backfill candle data for an instrument x timeframe
   bot       Run the Telegram delivery bot (polling mode)
   backtest  Run the go-live statistical gate runner (walk-forward + gates)
+  promote   Flip a strategy to live after its backtest passes (shadow→live gate)
 
 Run `rtrade <command> --help` for command-specific options.
 """
@@ -49,6 +50,14 @@ def _run_backtest() -> None:
     backtest_main()
 
 
+def _run_promote() -> None:
+    # `promote.main()` parses sys.argv via argparse and raises SystemExit with
+    # the go-live promotion code (0 enabled / 1 gate-fail / 2 no-run-or-unknown).
+    from rtrade.cli.promote import main as promote_main
+
+    promote_main()
+
+
 def _run_bot() -> None:
     # `bot.main()` is a coroutine — run it on a fresh event loop.
     from rtrade.cli.bot import main as bot_main
@@ -60,6 +69,7 @@ _COMMANDS: dict[str, Callable[[], None]] = {
     "auth": _run_auth,
     "backfill": _run_backfill,
     "backtest": _run_backtest,
+    "promote": _run_promote,
     "bot": _run_bot,
 }
 

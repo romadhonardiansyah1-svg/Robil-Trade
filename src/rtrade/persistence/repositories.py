@@ -490,3 +490,15 @@ class BacktestRunRepo:
         stmt = select(BacktestRun).order_by(BacktestRun.id.desc()).limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def latest_for(self, strategy: str, instrument: str | None = None) -> BacktestRun | None:
+        """Newest run for one strategy (optionally one instrument), or None.
+
+        The promote-gate keys go-live off this row's ``gates['all_passed']``.
+        """
+        stmt = select(BacktestRun).where(BacktestRun.strategy == strategy)
+        if instrument is not None:
+            stmt = stmt.where(BacktestRun.instrument == instrument)
+        stmt = stmt.order_by(BacktestRun.id.desc()).limit(1)
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()

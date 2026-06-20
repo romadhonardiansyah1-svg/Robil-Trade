@@ -1,0 +1,28 @@
+# ============================================================================
+# Parameter Strategi S4 — SMC/ICT Scalper (PLAN SP-4 §9.2).
+# Hanya jalan di XAUUSD M5/M15 untuk saat ini. Tuning HANYA via walk-forward
+# harness (SP-6) — dilarang tuning manual ke test set.
+# ============================================================================
+
+strategy: s4_smc_scalper
+gate_profile: scalping            # SP-4: longgarkan threshold lunak (bukan floor)
+instruments: ["XAUUSD"]           # allowlist — S4 hanya untuk XAUUSD
+entry_timeframes: ["5m", "15m"]   # allowlist — hanya entry tf scalping
+
+min_bars: 30
+
+smc:
+  swing_lookback: 3               # fractal half-window untuk swing/BOS/sweep
+  sweep_window: 8                 # max bar sweep boleh mendahului structure break
+
+levels:
+  sl_buffer_atr: 0.25             # SL di luar level sweep (× ATR)
+  rr_target: 1.8                  # >= rr_min 1.5 (GR-03)
+  valid_bars: 12
+
+confluence_weights:               # total 100 — §8.6
+  trend: 25
+  momentum: 20
+  structure: 20
+  volume: 15
+  macro: 20

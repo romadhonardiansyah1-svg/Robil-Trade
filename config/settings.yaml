@@ -25,6 +25,18 @@ signal:
     max_range_expansion_atr: 2.8
     max_entry_distance_atr: 1.25
 
+  profiles:                       # SP-4: soft-threshold profiles (NO hard floors here)
+    default:                      # = current global values; used by swing S1/S2
+      confluence_min_score: 60
+      edge_quality_min_score: 65
+      confidence_min: 0.55
+      max_signals_per_day_per_instrument: 3
+    scalping:                     # more permissive entry bar for M5/M15 scalpers
+      confluence_min_score: 50
+      edge_quality_min_score: 55
+      confidence_min: 0.50
+      max_signals_per_day_per_instrument: 10
+
 risk:
   risk_per_trade_pct: 1.0         # default saran sizing (hard cap 2.0 — GR-05)
   rr_min: 1.5                     # GR-03 hard floor (config < 1.5 ditolak)

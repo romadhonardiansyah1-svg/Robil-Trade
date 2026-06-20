@@ -1,0 +1,38 @@
+# ============================================================================
+# Parameter Strategi S3 — MTF-Confluence Scalper (PLAN SP-4 §9.1).
+# Hanya jalan di XAUUSD M5/M15 untuk saat ini. Tuning HANYA via walk-forward
+# harness (SP-6) — dilarang tuning manual ke test set.
+# ============================================================================
+
+strategy: s3_mtf_scalper
+gate_profile: scalping            # SP-4: longgarkan threshold lunak (bukan floor)
+instruments: ["XAUUSD"]           # allowlist — S3 hanya untuk XAUUSD
+entry_timeframes: ["5m", "15m"]   # allowlist — hanya entry tf scalping
+
+min_bars: 50
+
+trend:
+  ema_fast: 20
+  ema_mid: 50
+  vwap_window: 20
+  ema_rising_lookback: 5
+
+momentum:
+  rsi_long_max: 45                # dip sehat untuk LONG (RSI exiting low)
+  rsi_short_min: 55               # mirror untuk SHORT
+
+volume:
+  min_ratio: 0.0                  # filter volume S3 OFF (edge_quality yang utama)
+  window: 20
+
+levels:
+  sl_atr_mult: 1.2                # k×ATR, di-clamp ke [0.5, 3.0] (GR-04)
+  rr_target: 1.8                  # >= rr_min 1.5 (GR-03)
+  valid_bars: 12                  # limit tak tersentuh dalam 12 bar → expired
+
+confluence_weights:               # total 100 — §8.6
+  trend: 25
+  momentum: 20
+  structure: 20
+  volume: 15
+  macro: 20

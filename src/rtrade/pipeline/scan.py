@@ -13,7 +13,7 @@ import pandas as pd
 import structlog
 import yaml
 
-from rtrade.core.config import AppConfig, InstrumentConfig
+from rtrade.core.config import AppConfig, GateProfile, InstrumentConfig
 from rtrade.core.constants import (
     FUNDING_EXTREME_ABS,
     AuditStage,
@@ -885,8 +885,17 @@ async def _run_strategies(
             continue
 
         strategy_cfg = _load_strategy_config(strategy_name)
+        if not _strategy_applies(strategy_cfg, instrument, entry_tf):
+            logger.info(
+                "strategy not applicable for instrument/timeframe, skipping",
+                strategy=strategy_name,
+                symbol=instrument.symbol,
+                entry_tf=entry_tf.value,
+            )
+            continue
         valid_bars = strategy_cfg.get_int("levels.valid_bars", 6)
-        edge_cfg = _edge_quality_config(cfg)
+        profile = _active_profile(cfg, strategy_cfg)
+        edge_cfg = _edge_quality_config(cfg, min_score=profile.edge_quality_min_score)
 
         # F2: S2 hard-block — skip strategy if high-impact event within hours.
         hard_block_h = strategy_cfg.get_int("news.hard_block_hours", 0)
@@ -930,7 +939,7 @@ async def _run_strategies(
             risk_pct=risk_pct,
             equity=cfg.settings.risk.equity_usd,
             rr_min=cfg.settings.risk.rr_min,
-            confluence_min_score=cfg.settings.signal.confluence_min_score,
+            confluence_min_score=profile.confluence_min_score,
             valid_bars=valid_bars,
             timeframe=entry_tf,
             edge_quality_enabled=cfg.settings.signal.edge_quality.enabled,
@@ -1010,7 +1019,7 @@ async def _run_strategies(
             regime=regime.regime,
             required_regime=strategy.required_regime,
             signals_today=signals_today,
-            max_signals_per_day=cfg.settings.signal.max_signals_per_day_per_instrument,
+            max_signals_per_day=profile.max_signals_per_day_per_instrument,
             paper_outcomes=paper_outcomes,
             expectancy_window=cfg.settings.risk.expectancy_guard_window,
         )
@@ -1100,7 +1109,7 @@ async def _run_strategies(
                 candidate,
                 pack,
                 client,
-                confidence_min=cfg.settings.signal.confidence_min,
+                confidence_min=profile.confidence_min,
                 analyst_model=resolve_role_model(cfg, "analyst"),
                 critic_model=resolve_role_model(cfg, "critic"),
                 budget_guard=budget_guard,
@@ -1118,7 +1127,7 @@ async def _run_strategies(
                     candidate,
                     pack,
                     client,
-                    confidence_min=cfg.settings.signal.confidence_min,
+                    confidence_min=profile.confidence_min,
                     analyst_model=flagship_model,
                     critic_model=flagship_model,
                     budget_guard=budget_guard,
@@ -1177,12 +1186,12 @@ async def _run_strategies(
                 regime=regime.regime,
                 required_regime=strategy.required_regime,
                 signals_today=signals_today,
-                max_signals_per_day=cfg.settings.signal.max_signals_per_day_per_instrument,
+                max_signals_per_day=profile.max_signals_per_day_per_instrument,
                 paper_outcomes=paper_outcomes,
                 expectancy_window=cfg.settings.risk.expectancy_guard_window,
                 # --- P2 additions (only meaningful post-LLM) ---
                 confidence=float(pres.confidence),
-                confidence_min=cfg.settings.signal.confidence_min,
+                confidence_min=profile.confidence_min,
                 # GR-10: frozen pre-LLM candidate. Vacuous today (deterministic
                 # candidate isn't mutated by the LLM) but durable vs future paths.
                 original_candidate=candidate,
@@ -1391,10 +1400,10 @@ def _load_strategy_config(strategy_name: str) -> StrategyConfig:
     return StrategyConfig(raw=doc)
 
 
-def _edge_quality_config(cfg: AppConfig) -> EdgeQualityConfig:
+def _edge_quality_config(cfg: AppConfig, *, min_score: int | None = None) -> EdgeQualityConfig:
     eq = cfg.settings.signal.edge_quality
     return EdgeQualityConfig(
-        min_score=eq.min_score,
+        min_score=eq.min_score if min_score is None else min_score,
         max_spread_atr=eq.max_spread_atr,
         min_atr_percentile=eq.min_atr_percentile,
         max_atr_percentile=eq.max_atr_percentile,
@@ -1406,6 +1415,33 @@ def _edge_quality_config(cfg: AppConfig) -> EdgeQualityConfig:
         max_range_expansion_atr=eq.max_range_expansion_atr,
         max_entry_distance_atr=eq.max_entry_distance_atr,
     )
+
+
+def _active_profile(cfg: AppConfig, strategy_cfg: StrategyConfig) -> GateProfile:
+    """Select the gate profile for a strategy via its `gate_profile` YAML key.
+
+    Absent / unknown key → the `default` profile (= global values), so swing
+    strategies (S1/S2) keep their current thresholds unchanged.
+    """
+    name = str(strategy_cfg.get("gate_profile", "default"))
+    return cfg.settings.signal.profile(name)
+
+
+def _strategy_applies(
+    strategy_cfg: StrategyConfig,
+    instrument: InstrumentConfig,
+    entry_tf: Timeframe,
+) -> bool:
+    """True unless the strategy YAML restricts it away from this symbol/timeframe.
+
+    `instruments: [...]` and `entry_timeframes: [...]` are optional allowlists.
+    Absent (or empty) → the strategy applies everywhere (S1/S2 back-compat).
+    """
+    symbols = strategy_cfg.get("instruments")
+    if isinstance(symbols, list) and symbols and instrument.symbol not in symbols:
+        return False
+    tfs = strategy_cfg.get("entry_timeframes")
+    return not (isinstance(tfs, list) and tfs and entry_tf.value not in tfs)
 
 
 def _event_to_gate_dict(event: EconomicEvent) -> dict[str, object]:

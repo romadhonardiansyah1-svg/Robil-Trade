@@ -90,6 +90,21 @@ class EdgeQualitySettings(_StrictModel):
         return self
 
 
+class GateProfile(_StrictModel):
+    """Soft (non-floor) signal thresholds, swappable per strategy/timeframe.
+
+    Hard risk floors (rr_min, sl_atr, risk_per_trade_pct, news blackout,
+    llm.enabled) are deliberately NOT here — they stay globally validated in
+    RiskSettings/LLMSettings. A profile only loosens/tightens the gates that are
+    safe to vary between swing and scalping.
+    """
+
+    confluence_min_score: int = Field(ge=0, le=100)
+    edge_quality_min_score: int = Field(ge=0, le=100)
+    confidence_min: float = Field(ge=0.0, le=1.0)
+    max_signals_per_day_per_instrument: int = Field(ge=1)
+
+
 class SignalSettings(_StrictModel):
     confluence_min_score: int = Field(ge=0, le=100)
     confidence_min: float = Field(ge=0.0, le=1.0)
@@ -101,6 +116,28 @@ class SignalSettings(_StrictModel):
     # acting on under-warmed indicators/regime. Floor 200 keeps the legacy minimum.
     warmup_bars: int = Field(default=500, ge=200)
     edge_quality: EdgeQualitySettings
+    # SP-4: named soft-threshold profiles. `default` is auto-synthesized from the
+    # global values above when omitted, so configs without a profiles block are
+    # byte-compatible. Hard floors are never profileable.
+    profiles: dict[str, GateProfile] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _ensure_default_profile(self) -> "SignalSettings":
+        if "default" not in self.profiles:
+            self.profiles = {
+                **self.profiles,
+                "default": GateProfile(
+                    confluence_min_score=self.confluence_min_score,
+                    edge_quality_min_score=self.edge_quality.min_score,
+                    confidence_min=self.confidence_min,
+                    max_signals_per_day_per_instrument=self.max_signals_per_day_per_instrument,
+                ),
+            }
+        return self
+
+    def profile(self, name: str) -> GateProfile:
+        """Return the named gate profile, falling back to `default`."""
+        return self.profiles.get(name, self.profiles["default"])
 
 
 class RiskSettings(_StrictModel):

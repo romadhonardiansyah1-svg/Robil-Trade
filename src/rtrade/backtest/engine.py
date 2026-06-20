@@ -89,7 +89,7 @@ def run_backtest(
     """
     highs = df["high"].astype(float).values
     lows = df["low"].astype(float).values
-    df["open"].astype(float).values
+    opens = df["open"].astype(float).values
     n_bars = len(df)
 
     equity = initial_equity
@@ -171,7 +171,14 @@ def run_backtest(
                 if exit_reason is not None:
                     trade.exit_bar = i
                     if exit_reason == "SL":
-                        trade.exit_price = exit_state.current_sl
+                        # A9: a stop order slips with a gap. If the bar OPENED
+                        # beyond the stop, fill at the worse of the stop and open.
+                        sl_level = exit_state.current_sl
+                        bar_open = float(opens[i])
+                        if trade.direction == "BUY":
+                            trade.exit_price = min(sl_level, bar_open)
+                        else:
+                            trade.exit_price = max(sl_level, bar_open)
                     else:
                         trade.exit_price = trade.take_profit
                     trade.exit_reason = exit_reason
@@ -202,11 +209,19 @@ def run_backtest(
                 # If BOTH hit in same bar → SL first (worst-case assumption).
                 if (sl_hit and tp_hit) or sl_hit:
                     trade.exit_bar = i
-                    trade.exit_price = trade.stop_loss
+                    # A9: a stop order slips with a gap. If the bar OPENED beyond
+                    # the stop, fill at the worse of the stop level and the open.
+                    bar_open = float(opens[i])
+                    if trade.direction == "BUY":
+                        trade.exit_price = min(trade.stop_loss, bar_open)
+                    else:
+                        trade.exit_price = max(trade.stop_loss, bar_open)
                     trade.exit_reason = "SL"
                     break
                 elif tp_hit:
                     trade.exit_bar = i
+                    # A9: a take-profit is a limit order — a gap THROUGH the level
+                    # does not give a better fill, so it fills at exactly the TP.
                     trade.exit_price = trade.take_profit
                     trade.exit_reason = "TP"
                     break

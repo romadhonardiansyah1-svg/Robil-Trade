@@ -184,6 +184,10 @@ def run_walkforward_harness(
     all_oos_r: list[float] = []
     per_window: list[dict[str, Any]] = []
 
+    # A8: size warmup by the ACTUAL bar duration (robust to any timeframe), not
+    # by assuming 1 bar == 1 hour. Inferred once from the median index spacing.
+    bar_dur = pd.Series(df.index).diff().median() if len(df.index) >= 2 else pd.NaT
+
     for window in windows:
         # Get test period slice (with warmup from train end).
         train_end_ts = pd.Timestamp(window.train_end)
@@ -191,7 +195,11 @@ def run_walkforward_harness(
         test_end_ts = pd.Timestamp(window.test_end)
 
         # Include warmup bars before test start for indicator computation.
-        warmup_start = train_end_ts - pd.Timedelta(hours=warmup_bars)
+        # Fall back to the legacy hourly assumption if the duration is unknown.
+        if pd.isna(bar_dur):
+            warmup_start = train_end_ts - pd.Timedelta(hours=warmup_bars)
+        else:
+            warmup_start = train_end_ts - warmup_bars * bar_dur
         wf_df = df[(df.index >= warmup_start) & (df.index < test_end_ts)]
 
         if wf_df.empty or len(wf_df) < warmup_bars + 10:
@@ -201,7 +209,7 @@ def run_walkforward_harness(
         test_mask = wf_df.index >= test_start_ts
         if not test_mask.any():
             continue
-        first_test_iloc = int(test_mask.values.argmax())
+        first_test_iloc = int(test_mask.argmax())
 
         # Generate signals on the full wf_df (indicators warm from warmup).
         raw_signals = generate_signals(

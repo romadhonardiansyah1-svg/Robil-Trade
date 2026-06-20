@@ -140,6 +140,12 @@ def run_backtest(
 
         # Phase 2: After fill, check SL/TP on subsequent bars.
         # If smart_exit is configured, use apply_smart_exit per bar.
+        # Realized-leg accounting (A1): partials close part of the position early;
+        # the remaining fraction exits at the final exit price. Defaults describe a
+        # plain full-position trade (no partial) so the non-smart path is unchanged.
+        realized_r = 0.0
+        remaining_pct = 1.0
+        partial_taken = False
         if smart_exit is not None:
             fill_price = trade.fill_price
             assert fill_price is not None  # guaranteed by the fill phase above
@@ -170,6 +176,10 @@ def run_backtest(
                         trade.exit_price = trade.take_profit
                     trade.exit_reason = exit_reason
                     break
+            # Capture realized-leg accounting from the final smart-exit state.
+            realized_r = exit_state.realized_r
+            remaining_pct = exit_state.remaining_pct
+            partial_taken = exit_state.partial_taken
         else:
             for i in range(trade.fill_bar, n_bars):  # type: ignore[arg-type]
                 if i == trade.fill_bar:
@@ -209,10 +219,11 @@ def run_backtest(
 
         # Calculate PnL and R-multiple.
         if trade.fill_price is not None and trade.exit_price is not None:
+            # Final leg R: the remaining (unclosed) fraction exits at exit_price.
             if trade.direction == "BUY":
-                raw_pnl = trade.exit_price - trade.fill_price
+                final_leg_r_num = trade.exit_price - trade.fill_price
             else:
-                raw_pnl = trade.fill_price - trade.exit_price
+                final_leg_r_num = trade.fill_price - trade.exit_price
 
             # Apply costs.
             trade.cost = 0.0
@@ -221,11 +232,27 @@ def run_backtest(
 
             sl_dist = abs(trade.fill_price - trade.stop_loss)
             if sl_dist > 0:
-                # Risk-based sizing.
+                # Total realized R = closed partial legs + remaining leg at exit.
+                final_leg_r = final_leg_r_num / sl_dist
+                gross_r = realized_r + remaining_pct * final_leg_r
+
+                # Costs (conservative): a full round-turn is charged on the whole
+                # position (cost / sl_dist in R terms). A partial fill adds an
+                # extra exit-side crossing on the closed fraction, so we charge an
+                # additional half round-turn on that fraction. This never
+                # under-counts costs relative to the plain full-position trade.
+                cost_r = trade.cost / sl_dist
+                if partial_taken:
+                    closed_fraction = 1.0 - remaining_pct
+                    cost_r += (trade.cost / 2.0) * closed_fraction / sl_dist
+
+                net_r = gross_r - cost_r
+
+                # Risk-based sizing: full position risking sl_dist == risk_amount,
+                # so PnL scales as net_r * risk_amount.
                 risk_amount = equity * (risk_pct / 100)
-                position_size = risk_amount / sl_dist
-                trade.pnl = (raw_pnl - trade.cost) * position_size
-                trade.r_multiple = (raw_pnl - trade.cost) / sl_dist
+                trade.r_multiple = net_r
+                trade.pnl = net_r * risk_amount
             else:
                 trade.pnl = 0.0
                 trade.r_multiple = 0.0

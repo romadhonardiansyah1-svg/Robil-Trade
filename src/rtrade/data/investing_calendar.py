@@ -1,9 +1,10 @@
 """Investing.com economic-calendar provider (independent re-implementation).
 
-Low-dependency httpx JSON client behind the CalendarProvider ABC (ADR-A02).
-Replaces the paid-only Finnhub /calendar/economic (HTTP 403 on free tier).
-No Selenium/browser automation (ADR-A04). All parsing re-implemented from the
-public endpoint shape; no third-party GPL/AGPL code (ADR-A10).
+Low-dependency httpx JSON client behind the CalendarProvider ABC. Replaces the
+paid-only Finnhub /calendar/economic (HTTP 403 on free tier). Endpoint choice and
+Terms-of-Service rationale are documented in ADR-A12. No Selenium/browser
+automation. All parsing re-implemented from the public endpoint shape; no
+third-party GPL/AGPL code (ADR-A10).
 """
 
 from __future__ import annotations

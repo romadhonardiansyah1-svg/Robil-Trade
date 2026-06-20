@@ -83,4 +83,5 @@ calendar:
   sync_lookforward_days: 7
   sources:
     - { name: investing, enabled: true }
+    - { name: nasdaq, enabled: true }
     - { name: static_high_impact, enabled: true }

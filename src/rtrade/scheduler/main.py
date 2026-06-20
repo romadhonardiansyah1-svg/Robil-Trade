@@ -174,7 +174,10 @@ async def run_worker() -> None:
                 "no calendar source; fail-open active — non-crypto akan trade buta terhadap berita"
             )
         else:
-            logger.critical("no calendar source; GR-07b akan REJECT SEMUA signal non-crypto")
+            logger.critical(
+                "no calendar source; GR-07b akan REJECT SEMUA signal non-crypto — refusing to start"
+            )
+            raise SystemExit(1)
 
     logger.info("starting Robil Trade worker")
 

@@ -223,8 +223,10 @@ class OAuth2Provider(CredentialProvider):
                     token_body = token_resp.json()
                     logger.info(
                         "token exchange response",
-                        body=token_body,
                         status=token_resp.status_code,
+                        scope=token_body.get("scope"),
+                        expires_in=token_body.get("expires_in"),
+                        token_type=token_body.get("token_type"),
                     )
                     final_token = token_body.get("access_token")
                     if final_token:
@@ -237,7 +239,10 @@ class OAuth2Provider(CredentialProvider):
                         save_token(self._sid, tok)
                         logger.info("device code login berhasil", provider=self._sid)
                         return tok
-                    raise RuntimeError(f"token exchange gagal: {token_body}")
+                    raise RuntimeError(
+                        f"token exchange gagal (status {token_resp.status_code}): "
+                        f"{token_body.get('error', 'no access_token in response')}"
+                    )
 
                 error = body.get("error", "")
 

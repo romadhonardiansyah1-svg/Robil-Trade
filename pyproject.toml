@@ -42,6 +42,9 @@ dependencies = [
     "cryptography>=43.0",
 ]
 
+[project.scripts]
+rtrade = "rtrade.cli.__main__:main"
+
 [dependency-groups]
 dev = [
     "ruff>=0.8",

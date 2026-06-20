@@ -1,5 +1,19 @@
 """Meta-labeling with XGBoost (PLAN P3-T6).
 
+STATUS: EXPERIMENTAL / INERT — intentionally dormant.
+
+This module is NOT wired into the production signal path. Nothing in the
+live scan pipeline imports or calls it, and ``predict()`` MUST NOT be called
+from ``scan.py``. It is kept deliberately dormant (this is by design, not a
+bug or dead code to be removed).
+
+Per ADR-A08 and PLAN P3-6, meta-labeling stays gated behind a backtest
+OOS-expectancy proof: it may only be promoted into the scan path once it is
+demonstrated to raise expectancy out-of-sample via the backtest gate. If it
+does not beat OOS expectancy it stays disabled (a negative result is a valid
+result). Do not delete this module and do not import it into scan.py until
+that gate has been passed.
+
 Triple-barrier labeling from backtest results, then XGBoost binary
 classifier to predict P(TP hit before SL).
 
@@ -7,9 +21,6 @@ Features: confluence breakdown components, regime, RSI, ATR percentile,
           ADX, EMA alignment score.
 
 Validation: Purged + embargoed CV (prevent look-ahead in time-series).
-
-ONLY used if it raises expectancy OOS. If not → disable and document
-(negative result is a valid result).
 """
 
 from __future__ import annotations

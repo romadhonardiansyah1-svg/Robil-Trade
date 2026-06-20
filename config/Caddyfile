@@ -19,8 +19,12 @@
 
     # SEMUA route lain wajib bearer token.
     handle {
+        # C1: NO default token. If $API_AUTH_TOKEN is unset, Caddy substitutes an
+        # empty string, so the matcher compares against `Bearer ` (empty) — no
+        # real client token can match, and every request fails @no_auth -> 401.
+        # Fail CLOSED: an unset var must NOT yield a usable default token.
         @no_auth {
-            not header Authorization "Bearer {$API_AUTH_TOKEN:changeme}"
+            not header Authorization "Bearer {$API_AUTH_TOKEN}"
         }
         respond @no_auth 401 {
             body "Unauthorized"

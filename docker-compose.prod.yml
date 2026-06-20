@@ -164,7 +164,9 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN:-localhost}
-      API_AUTH_TOKEN: ${API_AUTH_TOKEN:-changeme}
+      # C1: REQUIRED — no default. `:?` makes `docker compose` refuse to start
+      # when API_AUTH_TOKEN is unset/empty (fail closed, no 'changeme' fallback).
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:?API_AUTH_TOKEN must be set}
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

@@ -10,10 +10,13 @@ from __future__ import annotations
 
 from itertools import pairwise
 
+import numpy as np
+
 from rtrade.backtest.metrics import BacktestMetrics
 from rtrade.backtest.validation import (
     deflated_sharpe_ratio,
     expected_max_sharpe,
+    probability_of_backtest_overfitting,
     run_validation_gates,
 )
 
@@ -99,3 +102,43 @@ def test_dsr_undeflated_flag_when_single_config() -> None:
 def test_dsr_deflated_flag_when_multiple_configs() -> None:
     res = run_validation_gates(_metrics(), n_trials=10, permutation_p=None)
     assert res.dsr_undeflated is False
+
+
+# --------------------------------------------------------------------------- #
+# PBO as a model-SELECTION diagnostic (A5, Option A) — NOT a single-config gate
+# --------------------------------------------------------------------------- #
+def test_pbo_gate_absent_when_not_evaluated() -> None:
+    """Single-config run (pbo_value=None): no PBO gate, no rubber stamp."""
+    res = run_validation_gates(_metrics(), pbo_value=None, permutation_p=None)
+    assert "pbo <= 0.30" not in res.gate_results
+    assert res.pbo is None
+
+
+def test_pbo_gate_present_and_fails_when_overfit() -> None:
+    """A supplied PBO above max_pbo adds the gate and fails it."""
+    res = run_validation_gates(_metrics(), pbo_value=0.5, max_pbo=0.30, permutation_p=None)
+    assert res.pbo == 0.5
+    assert res.gate_results["pbo <= 0.30"] is False
+    assert res.all_passed is False
+
+
+def test_pbo_gate_present_and_passes_when_low() -> None:
+    """A supplied low PBO adds the gate and passes it."""
+    res = run_validation_gates(_metrics(), pbo_value=0.1, max_pbo=0.30, permutation_p=None)
+    assert res.pbo == 0.1
+    assert res.gate_results["pbo <= 0.30"] is True
+
+
+# --------------------------------------------------------------------------- #
+# probability_of_backtest_overfitting — FAIL CLOSED on insufficient data
+# --------------------------------------------------------------------------- #
+def test_pbo_insufficient_rows_fails_closed() -> None:
+    """T < s_partitions must return 1.0 (degenerate == fully overfit)."""
+    matrix = np.zeros((4, 1), dtype=float)
+    assert probability_of_backtest_overfitting(matrix, s_partitions=16) == 1.0
+
+
+def test_pbo_single_config_fails_closed() -> None:
+    """N < 2 (a single configuration) must return 1.0, not 0.0."""
+    matrix = np.zeros((20, 1), dtype=float)
+    assert probability_of_backtest_overfitting(matrix, s_partitions=16) == 1.0

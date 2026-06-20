@@ -128,7 +128,10 @@ def _print_report(
     _out(f"Profit factor: {vgr.profit_factor_oos:.2f}")
     _out(f"Max DD:        {vgr.max_drawdown_pct:.2f}%")
     _out(f"DSR prob:      {vgr.dsr_probability:.4f}")
-    _out(f"PBO:           {vgr.pbo:.4f}")
+    if vgr.pbo is None:
+        _out("PBO:           n/a (not evaluated — model-selection diagnostic)")
+    else:
+        _out(f"PBO:           {vgr.pbo:.4f}")
     if permutation_p is not None:
         _out(f"Permutation p: {permutation_p:.4f}")
     for gate_id, passed in vgr.gate_results.items():

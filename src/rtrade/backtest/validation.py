@@ -17,6 +17,22 @@ Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality"):
 Probability of Backtest Overfitting (PBO via CSCV, Bailey et al. 2017):
     Combinatorially Symmetric Cross-Validation with S=16 partitions.
     PBO = proportion of combinations where OOS rank of IS-best is below median.
+
+    IMPORTANT — PBO is a model-SELECTION diagnostic, NOT a single-config gate.
+    PBO quantifies the overfitting introduced by SELECTING the best-looking
+    configuration among MANY candidate configurations (a parameter sweep). It
+    is therefore computed in the parameter-sweep / model-selection step over an
+    (T, N>=2) returns matrix and supplied to ``run_validation_gates`` via the
+    ``pbo_value`` argument. The single-config go-live gate does NOT evaluate
+    PBO: with only one configuration there is nothing to select among, so there
+    is no PBO to compute. When ``pbo_value is None`` the ``"pbo <= 0.30"`` gate
+    is OMITTED entirely (mirroring the optional permutation gate) rather than
+    rubber-stamped against a value that was never measured.
+
+    ``probability_of_backtest_overfitting`` remains the correct CSCV
+    implementation for the sweep step, and FAILS CLOSED (returns 1.0, i.e.
+    fully overfit) when the input is too degenerate to compute a real PBO — so
+    that wiring a degenerate result into a gate can never silently pass.
 """
 
 from __future__ import annotations
@@ -44,7 +60,7 @@ class ValidationGateResult:
     max_drawdown_pct: float
     dsr_probability: float
     dsr_undeflated: bool  # True when n_trials < 2 (no overfitting deflation applied)
-    pbo: float
+    pbo: float | None  # model-selection diagnostic; None when not evaluated (single config)
     permutation_p: float | None
     all_passed: bool
     gate_results: dict[str, bool]
@@ -119,11 +135,15 @@ def probability_of_backtest_overfitting(
         s_partitions: Number of partitions (default 16 per PLAN).
 
     Returns:
-        PBO value (should be ≤ 0.30 to pass validation gate).
+        PBO value in [0, 1] (should be <= 0.30 to pass the model-selection
+        validation gate). FAILS CLOSED: returns 1.0 (degenerate == fully
+        overfit) when there is too little data to compute a real PBO
+        (``t < s_partitions`` or fewer than 2 configurations), so that a
+        degenerate result wired into a gate fails closed rather than open.
     """
     t, n = returns_matrix.shape
     if t < s_partitions or n < 2:
-        return 0.0  # insufficient data
+        return 1.0  # insufficient data -> fail closed (treat as fully overfit)
 
     # Split time periods into S equal-sized groups.
     partition_size = t // s_partitions
@@ -171,7 +191,8 @@ def probability_of_backtest_overfitting(
         if oos_rank >= median_rank:
             overfit_count += 1
 
-    pbo = overfit_count / len(combos) if combos else 0.0
+    # No combinations to evaluate is itself degenerate -> fail closed.
+    pbo = overfit_count / len(combos) if combos else 1.0
     return pbo
 
 
@@ -188,7 +209,14 @@ def run_validation_gates(
     pbo_value: float | None = None,
     permutation_p: float | None = None,
 ) -> ValidationGateResult:
-    """Run all validation gates on backtest metrics (PLAN §8.11.4)."""
+    """Run all validation gates on backtest metrics (PLAN §8.11.4).
+
+    The ``"pbo <= 0.30"`` gate is a model-SELECTION diagnostic and is evaluated
+    ONLY when ``pbo_value`` is supplied (i.e. a parameter sweep produced it).
+    For a single-config go-live run ``pbo_value is None`` and the PBO gate is
+    omitted entirely — it does not count toward ``all_passed`` — so a run can
+    never silently pass a PBO it never computed.
+    """
     gates: dict[str, bool] = {}
 
     # Gate 1: Minimum trades.
@@ -227,9 +255,15 @@ def run_validation_gates(
             reason="n_trials < 2 -> no overfitting deflation applied (DSR == PSR vs 0)",
         )
 
-    # Gate 6: PBO.
-    pbo_val = pbo_value if pbo_value is not None else 0.0
-    gates["pbo <= 0.30"] = pbo_val <= max_pbo
+    # Gate 6: PBO — model-SELECTION diagnostic, only when actually evaluated.
+    # PBO measures overfitting from SELECTING among multiple candidate configs
+    # (a parameter sweep); it is computed in the model-selection step and passed
+    # in via ``pbo_value``. A single-config go-live run has nothing to select
+    # among, so ``pbo_value is None`` and the gate is OMITTED — never
+    # rubber-stamped against a value that was never measured (mirrors the
+    # optional permutation gate below).
+    if pbo_value is not None:
+        gates["pbo <= 0.30"] = pbo_value <= max_pbo
 
     # Gate 7: Permutation p-value (W7).
     if permutation_p is not None:
@@ -244,7 +278,7 @@ def run_validation_gates(
         max_drawdown_pct=metrics.max_drawdown_pct,
         dsr_probability=dsr_prob,
         dsr_undeflated=dsr_undeflated,
-        pbo=pbo_val,
+        pbo=pbo_value,
         permutation_p=permutation_p,
         all_passed=all_passed,
         gate_results=gates,

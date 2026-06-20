@@ -142,6 +142,11 @@ async def _ingest_incremental(
 ) -> int:
     """Fetch only what's missing: watermark − 2 bars overlap, tiny limit."""
     latest = await repo.latest(instrument_id, tf)
+    # BUG 5: freshness short-circuit. When the latest candle is still within the
+    # current bar (age <= one bar), no newer closed bar exists yet, so skip the
+    # provider call entirely instead of wasting a credit (Property 6, req 2.10).
+    if latest is not None and now - ensure_utc(latest.ts) <= timeframe_duration(tf):
+        return 0
     if latest is None:
         since = now - timedelta(days=120)
         limit = 500

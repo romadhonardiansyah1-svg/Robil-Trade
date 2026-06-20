@@ -126,11 +126,11 @@ class InvestingCalendarProvider(CalendarProvider):
         stop=stop_after_attempt(3),
         reraise=True,
     )
-    async def _get(self, path: str, params: dict[str, object]) -> httpx.Response:
+    async def _get(self, path: str, params: dict[str, str]) -> httpx.Response:
         return await self._http.get(path, params=params)
 
     async def fetch_events(self, start: date, end: date) -> list[DomainEvent]:
-        params: dict[str, object] = {
+        params: dict[str, str] = {
             "dateFrom": start.isoformat(),
             "dateTo": end.isoformat(),
             "timeframe": "60",
@@ -163,7 +163,9 @@ class InvestingCalendarProvider(CalendarProvider):
             try:
                 event_name = sanitize_event_text(str(row.get("event", "") or ""))
                 currency = _to_currency(str(row.get("country") or row.get("currency") or ""))
-                impact = _normalize_impact(row.get("impact", row.get("importance", 1)), event_name)
+                impact = _normalize_impact(
+                    str(row.get("impact", row.get("importance", 1))), event_name
+                )
                 date_str = str(row.get("date", ""))
                 time_str = str(row.get("time", "00:00:00"))
                 if not event_name or not date_str:

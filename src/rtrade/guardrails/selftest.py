@@ -14,8 +14,9 @@ from rtrade.guardrails.gate import run_gate
 from rtrade.signals.schemas import ConfluenceBreakdown, LevelSet, SignalCandidate
 
 
-def _make_candidate(**overrides: object) -> SignalCandidate:
-    defaults = {
+def _candidate_fields(**overrides: object) -> dict[str, object]:
+    """Build the field mapping for a self-test candidate (valid defaults)."""
+    defaults: dict[str, object] = {
         "candidate_id": "selftest",
         "symbol": "XAUUSD",
         "timeframe": Timeframe.H1,
@@ -38,7 +39,28 @@ def _make_candidate(**overrides: object) -> SignalCandidate:
         "created_at": datetime.now(UTC),
     }
     defaults.update(overrides)
-    return SignalCandidate(**defaults)  # type: ignore[arg-type]
+    return defaults
+
+
+def _make_candidate(**overrides: object) -> SignalCandidate:
+    """Construct a VALID candidate through the real constructor (runs validators)."""
+    return SignalCandidate(**_candidate_fields(**overrides))  # type: ignore[arg-type]
+
+
+def _make_bad_candidate(**overrides: object) -> SignalCandidate:
+    """Construct a KNOWN-BAD candidate for gate self-testing ONLY.
+
+    GR-02/GR-03/GR-04/GR-05 are enforced in the Pydantic ``model_validator`` /
+    field constraints at construction time, so the real constructor would reject
+    these illegal candidates before they ever reach ``run_gate``. To verify that
+    the *gate* (not just the schema) still rejects them, this helper bypasses the
+    construction-time validators via ``model_construct``.
+
+    GI-5: this validator bypass is confined to the startup self-test. It MUST NOT
+    be imported or used anywhere on the production signal path, where every
+    candidate is built through the real constructor and validated.
+    """
+    return SignalCandidate.model_construct(**_candidate_fields(**overrides))  # type: ignore[arg-type]
 
 
 def run_guardrail_selftest() -> list[str]:
@@ -50,7 +72,7 @@ def run_guardrail_selftest() -> list[str]:
     good = _make_candidate()
 
     # --- GR-02: Direction consistency ---
-    bad_dir = _make_candidate(
+    bad_dir = _make_bad_candidate(
         action=Action.BUY,
         levels=LevelSet(
             entry_limit=2000.0,
@@ -64,7 +86,7 @@ def run_guardrail_selftest() -> list[str]:
         problems.append("GR-02: BUY with SL>entry was NOT rejected")
 
     # --- GR-03: R:R floor ---
-    bad_rr = _make_candidate(
+    bad_rr = _make_bad_candidate(
         levels=LevelSet(
             entry_limit=2000.0,
             stop_loss=1990.0,
@@ -77,7 +99,7 @@ def run_guardrail_selftest() -> list[str]:
         problems.append("GR-03: R:R 0.5 was NOT rejected")
 
     # --- GR-04: SL distance ATR range ---
-    bad_sl_atr = _make_candidate(
+    bad_sl_atr = _make_bad_candidate(
         levels=LevelSet(
             entry_limit=2000.0,
             stop_loss=1980.0,  # 20/5 = 4.0x ATR > 3.0
@@ -90,7 +112,7 @@ def run_guardrail_selftest() -> list[str]:
         problems.append("GR-04: SL 4.0x ATR was NOT rejected")
 
     # --- GR-05: Risk cap ---
-    bad_risk = _make_candidate(risk_pct=3.0)
+    bad_risk = _make_bad_candidate(risk_pct=3.0)
     result = run_gate(bad_risk)
     if result.passed:
         problems.append("GR-05: risk 3.0% was NOT rejected")

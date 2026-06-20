@@ -43,18 +43,40 @@ def _has_calendar_source(cfg: AppConfig) -> bool:
     return False
 
 
+# BUG 3: spread TwelveData H1 instruments across the hour to avoid a credit burst.
+_TWELVEDATA_H1_MINUTES = ["0", "10", "20", "30"]
+
+
 def build_scan_schedules(
     instruments: list[InstrumentConfig],
 ) -> list[tuple[str, str, dict[str, str]]]:
-    """One (symbol, tf, cron_kwargs) per instrument×TF; stagger seconds to avoid bursts."""
+    """One (symbol, tf, cron_kwargs) per instrument×TF; stagger to avoid bursts.
+
+    TwelveData shares one rate-limited free bucket, so its H1 scans are spread
+    across minutes ``["0","10","20","30"]`` (all ``second="30"``) by per-TwelveData
+    instrument index, and H4 is moved onto ``minute="5"`` to clear the H1 boundary
+    (BUG 3). Non-TwelveData instruments keep the original second-stagger.
+    """
     schedules: list[tuple[str, str, dict[str, str]]] = []
+    td_idx = 0  # per-TwelveData-instrument index for the minute spread
     for idx, inst in enumerate(instruments):
+        is_twelvedata = inst.provider == "twelvedata"
         second = str(30 + (idx * 5) % 30)  # 30,35,40,... avoiding burst
+        h1_minute = "0"
+        if is_twelvedata:
+            h1_minute = _TWELVEDATA_H1_MINUTES[td_idx % len(_TWELVEDATA_H1_MINUTES)]
+            td_idx += 1
         for tf in inst.timeframes:
             if tf == Timeframe.H1:
-                cron = {"minute": "0", "second": second}
+                if is_twelvedata:
+                    cron = {"minute": h1_minute, "second": "30"}
+                else:
+                    cron = {"minute": "0", "second": second}
             elif tf == Timeframe.H4:
-                cron = {"minute": "0", "second": second, "hour": "0,4,8,12,16,20"}
+                if is_twelvedata:
+                    cron = {"minute": "5", "second": "30", "hour": "0,4,8,12,16,20"}
+                else:
+                    cron = {"minute": "0", "second": second, "hour": "0,4,8,12,16,20"}
             else:  # D1
                 cron = {"minute": "1", "second": second, "hour": "0"}
             schedules.append((inst.symbol, tf.value, cron))

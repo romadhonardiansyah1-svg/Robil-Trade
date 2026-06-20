@@ -12,9 +12,12 @@ duplicate signals (dedup key: instrument, timeframe, strategy, bar_ts).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import structlog
 
 from rtrade.core.config import AppConfig
+from rtrade.core.errors import RateLimitExceeded
 from rtrade.monitoring.healthcheck import HealthChecker
 from rtrade.pipeline import run_scan, sync_calendar, track_paper_signals
 
@@ -23,6 +26,9 @@ logger = structlog.get_logger(__name__)
 # F3: consecutive failure tracking for alert.
 _fail_counts: dict[str, int] = {}
 _ALERT_THRESHOLD = 3
+# F3: once-then-cooldown alert state — last alert timestamp per key.
+_last_alert_at: dict[str, datetime] = {}
+_ALERT_COOLDOWN = timedelta(hours=2)
 
 
 async def scan_job(
@@ -57,10 +63,17 @@ async def scan_job(
             error=str(exc),
             consecutive_failures=_fail_counts[key],
         )
+        # Rate-limit bursts must never spam Telegram — count but never alert (F3).
+        if isinstance(exc, RateLimitExceeded):
+            return
         if _fail_counts[key] >= _ALERT_THRESHOLD:
-            await _send_failure_alert(
-                f"⚠️ scan {key} gagal {_fail_counts[key]}x berturut-turut: {exc}"
-            )
+            now = datetime.now(UTC)
+            last = _last_alert_at.get(key)
+            if last is None or now - last >= _ALERT_COOLDOWN:
+                await _send_failure_alert(
+                    f"⚠️ scan {key} gagal {_fail_counts[key]}x berturut-turut: {exc}"
+                )
+                _last_alert_at[key] = now
 
 
 async def _send_failure_alert(message: str) -> None:

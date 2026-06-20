@@ -120,11 +120,11 @@ class NasdaqCalendarProvider(CalendarProvider):
         stop=stop_after_attempt(3),
         reraise=True,
     )
-    async def _get(self, path: str, params: dict[str, object]) -> httpx.Response:
+    async def _get(self, path: str, params: dict[str, str]) -> httpx.Response:
         return await self._http.get(path, params=params)
 
     async def fetch_events(self, start: date, end: date) -> list[DomainEvent]:
-        params: dict[str, object] = {
+        params: dict[str, str] = {
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
         }
@@ -166,7 +166,7 @@ class NasdaqCalendarProvider(CalendarProvider):
                     str(row_dict.get("country", row_dict.get("currency", "")) or "")
                 )
                 impact = _normalize_impact(
-                    row_dict.get("impact", row_dict.get("importance", 1)), event_name
+                    str(row_dict.get("impact", row_dict.get("importance", 1))), event_name
                 )
                 date_str = str(row_dict.get("date", ""))
                 time_str = str(row_dict.get("time", "00:00:00"))

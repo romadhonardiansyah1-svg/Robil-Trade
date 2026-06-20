@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import redis.asyncio as aioredis
 import structlog
 import yaml
 
@@ -44,7 +43,7 @@ from rtrade.papertrack.excursion import compute_excursion
 from rtrade.papertrack.minute_resolution import resolve_ambiguous_bar
 from rtrade.papertrack.tracker import CandleBar, replay_signal
 from rtrade.papertrack.virtual_exits import evaluate_virtual_exits
-from rtrade.persistence.db import create_engine, create_session_factory
+from rtrade.persistence.db import _get_engine, _get_redis, create_session_factory
 from rtrade.persistence.models import DerivativesSnapshot, EconomicEvent, Signal
 from rtrade.persistence.repositories import (
     AuditRepo,
@@ -178,10 +177,10 @@ async def run_scan(
     tf = Timeframe(timeframe)
     instrument = cfg.instrument(symbol)
 
-    redis_client = aioredis.from_url(cfg.secrets.redis_url)
+    redis_client = _get_redis(cfg.secrets.redis_url)
     limiter = RateLimiter(redis_client)
     provider = _make_market_provider(instrument, cfg, limiter)
-    engine = create_engine(cfg.secrets.database_url)
+    engine = _get_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
 
     try:
@@ -387,8 +386,6 @@ async def run_scan(
         return result
     finally:
         await provider.close()
-        await redis_client.aclose()
-        await engine.dispose()
 
 
 def _make_calendar_provider(name: str, cfg: AppConfig, limiter: RateLimiter) -> CalendarProvider:
@@ -432,9 +429,9 @@ async def sync_calendar(
     """Fetch and upsert economic calendar events via composite provider."""
     cfg = config or AppConfig.load(config_dir=config_dir, env_file=env_file)
 
-    redis_client = aioredis.from_url(cfg.secrets.redis_url)
+    redis_client = _get_redis(cfg.secrets.redis_url)
     limiter = RateLimiter(redis_client)
-    engine = create_engine(cfg.secrets.database_url)
+    engine = _get_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
 
     cal_cfg = cfg.settings.calendar
@@ -494,8 +491,6 @@ async def sync_calendar(
             return count
     finally:
         await composite.close()
-        await redis_client.aclose()
-        await engine.dispose()
 
 
 async def track_paper_signals(
@@ -506,137 +501,132 @@ async def track_paper_signals(
 ) -> int:
     """Advance paper-trade statuses for open signals using latest candles."""
     cfg = config or AppConfig.load(config_dir=config_dir, env_file=env_file)
-    engine = create_engine(cfg.secrets.database_url)
+    engine = _get_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
     updates = 0
 
-    try:
-        async with session_factory() as session:
-            signal_repo = SignalRepo(session)
-            candle_repo = CandleRepo(session)
-            for signal in await signal_repo.open_for_tracking():
-                start = ensure_utc(signal.published_at or signal.bar_ts)
-                rows = await candle_repo.get_range(
-                    signal.instrument_id,
-                    Timeframe(signal.timeframe),
-                    start,
-                    datetime.now(UTC),
+    async with session_factory() as session:
+        signal_repo = SignalRepo(session)
+        candle_repo = CandleRepo(session)
+        for signal in await signal_repo.open_for_tracking():
+            start = ensure_utc(signal.published_at or signal.bar_ts)
+            rows = await candle_repo.get_range(
+                signal.instrument_id,
+                Timeframe(signal.timeframe),
+                start,
+                datetime.now(UTC),
+            )
+            if not rows:
+                continue
+            bars = [
+                CandleBar(
+                    ts=ensure_utc(r.ts),
+                    high=float(r.high),
+                    low=float(r.low),
+                    close=float(r.close),
                 )
-                if not rows:
-                    continue
-                bars = [
-                    CandleBar(
-                        ts=ensure_utc(r.ts),
-                        high=float(r.high),
-                        low=float(r.low),
-                        close=float(r.close),
+                for r in rows
+            ]
+            entry = float(signal.entry_limit or 0)
+            sl = float(signal.stop_loss or 0)
+            tp = float(signal.take_profit or 0)
+
+            update = replay_signal(
+                signal.signal_id,
+                signal.action,
+                entry,
+                sl,
+                tp,
+                signal.valid_until or signal.bar_ts,
+                already_filled=signal.status == SignalStatus.FILLED.value,
+                candles=bars,
+            )
+            if update is None or update.new_status.value == signal.status:
+                continue
+
+            # --- T22: 1-minute resolution for ambiguous bars (crypto only) ---
+            final_status = update.new_status
+            outcome_r = update.outcome_r
+            resolution = "bar"
+            if update.new_status == SignalStatus.SL_HIT and _bar_is_ambiguous(
+                signal.action, sl, tp, bars, update.resolved_at
+            ):
+                resolution = "worst_case"
+                inst_row = await InstrumentRepo(session).get_by_id(signal.instrument_id)
+                if inst_row is not None and inst_row.market == "crypto":
+                    minute_bars = await _fetch_minute_bars(cfg, inst_row, update.resolved_at)
+                    if minute_bars:
+                        first = resolve_ambiguous_bar(signal.action, entry, sl, tp, minute_bars)
+                        resolution = "minute"
+                        if first == "TP":
+                            final_status = SignalStatus.TP_HIT
+                            sl_dist = abs(entry - sl) or 1.0
+                            outcome_r = abs(tp - entry) / sl_dist
+
+            await signal_repo.update_tracking_status(
+                update.signal_id,
+                status=final_status.value,
+                resolved_at=update.resolved_at,
+                outcome_r=Decimal(str(outcome_r)) if outcome_r is not None else None,
+            )
+            await signal_repo.merge_payload(signal.signal_id, "resolution", resolution)
+
+            # --- T23 + T24 + T30: analytics when trade RESOLVED ---
+            if final_status in (SignalStatus.TP_HIT, SignalStatus.SL_HIT):
+                fill_idx = _first_touch_index(signal.action, entry, bars)
+                after_fill = bars[fill_idx:] if fill_idx is not None else []
+                if after_fill:
+                    atr_val = (
+                        float(
+                            (signal.payload.get("candidate") or {})
+                            .get("levels", {})
+                            .get("atr_at_signal", 0)
+                        )
+                        or 1.0
                     )
-                    for r in rows
-                ]
-                entry = float(signal.entry_limit or 0)
-                sl = float(signal.stop_loss or 0)
-                tp = float(signal.take_profit or 0)
-
-                update = replay_signal(
-                    signal.signal_id,
-                    signal.action,
-                    entry,
-                    sl,
-                    tp,
-                    signal.valid_until or signal.bar_ts,
-                    already_filled=signal.status == SignalStatus.FILLED.value,
-                    candles=bars,
-                )
-                if update is None or update.new_status.value == signal.status:
-                    continue
-
-                # --- T22: 1-minute resolution for ambiguous bars (crypto only) ---
-                final_status = update.new_status
-                outcome_r = update.outcome_r
-                resolution = "bar"
-                if update.new_status == SignalStatus.SL_HIT and _bar_is_ambiguous(
-                    signal.action, sl, tp, bars, update.resolved_at
+                    await signal_repo.merge_payload(
+                        signal.signal_id,
+                        "virtual_exits",
+                        evaluate_virtual_exits(signal.action, entry, sl, tp, atr_val, after_fill),
+                    )
+                    mae_r, mfe_r = compute_excursion(signal.action, entry, sl, after_fill)
+                    await signal_repo.merge_payload(
+                        signal.signal_id,
+                        "excursion",
+                        {"mae_r": mae_r, "mfe_r": mfe_r},
+                    )
+                if (
+                    final_status == SignalStatus.SL_HIT
+                    and cfg.settings.llm.enabled
+                    and cfg.settings.llm.coroner_enabled
                 ):
-                    resolution = "worst_case"
-                    inst_row = await InstrumentRepo(session).get_by_id(signal.instrument_id)
-                    if inst_row is not None and inst_row.market == "crypto":
-                        minute_bars = await _fetch_minute_bars(cfg, inst_row, update.resolved_at)
-                        if minute_bars:
-                            first = resolve_ambiguous_bar(signal.action, entry, sl, tp, minute_bars)
-                            resolution = "minute"
-                            if first == "TP":
-                                final_status = SignalStatus.TP_HIT
-                                sl_dist = abs(entry - sl) or 1.0
-                                outcome_r = abs(tp - entry) / sl_dist
+                    try:
+                        from rtrade.llm.coroner import run_coroner
 
-                await signal_repo.update_tracking_status(
-                    update.signal_id,
-                    status=final_status.value,
-                    resolved_at=update.resolved_at,
-                    outcome_r=Decimal(str(outcome_r)) if outcome_r is not None else None,
-                )
-                await signal_repo.merge_payload(signal.signal_id, "resolution", resolution)
-
-                # --- T23 + T24 + T30: analytics when trade RESOLVED ---
-                if final_status in (SignalStatus.TP_HIT, SignalStatus.SL_HIT):
-                    fill_idx = _first_touch_index(signal.action, entry, bars)
-                    after_fill = bars[fill_idx:] if fill_idx is not None else []
-                    if after_fill:
-                        atr_val = (
-                            float(
-                                (signal.payload.get("candidate") or {})
-                                .get("levels", {})
-                                .get("atr_at_signal", 0)
-                            )
-                            or 1.0
+                        report = await run_coroner(
+                            _build_llm_client(cfg),
+                            model=resolve_role_model(cfg, "analyst"),
+                            candidate_payload=signal.payload.get("candidate") or {},
+                            price_path=[
+                                {
+                                    "ts": str(b.ts),
+                                    "high": b.high,
+                                    "low": b.low,
+                                    "close": b.close,
+                                }
+                                for b in after_fill[:12]
+                            ],
                         )
                         await signal_repo.merge_payload(
                             signal.signal_id,
-                            "virtual_exits",
-                            evaluate_virtual_exits(
-                                signal.action, entry, sl, tp, atr_val, after_fill
-                            ),
+                            "coroner",
+                            report.model_dump(),
                         )
-                        mae_r, mfe_r = compute_excursion(signal.action, entry, sl, after_fill)
-                        await signal_repo.merge_payload(
-                            signal.signal_id,
-                            "excursion",
-                            {"mae_r": mae_r, "mfe_r": mfe_r},
-                        )
-                    if (
-                        final_status == SignalStatus.SL_HIT
-                        and cfg.settings.llm.enabled
-                        and cfg.settings.llm.coroner_enabled
-                    ):
-                        try:
-                            from rtrade.llm.coroner import run_coroner
-
-                            report = await run_coroner(
-                                _build_llm_client(cfg),
-                                model=resolve_role_model(cfg, "analyst"),
-                                candidate_payload=signal.payload.get("candidate") or {},
-                                price_path=[
-                                    {
-                                        "ts": str(b.ts),
-                                        "high": b.high,
-                                        "low": b.low,
-                                        "close": b.close,
-                                    }
-                                    for b in after_fill[:12]
-                                ],
-                            )
-                            await signal_repo.merge_payload(
-                                signal.signal_id,
-                                "coroner",
-                                report.model_dump(),
-                            )
-                        except Exception as exc:
-                            logger.warning("coroner failed", error=str(exc))
-                updates += 1
-            await session.commit()
-            return updates
-    finally:
-        await engine.dispose()
+                    except Exception as exc:
+                        logger.warning("coroner failed", error=str(exc))
+            updates += 1
+        await session.commit()
+        return updates
 
 
 def _bar_is_ambiguous(
@@ -669,7 +659,7 @@ async def _fetch_minute_bars(
 ) -> list[CandleBar]:
     """Fetch 1m candles for one ambiguous 1H bar (crypto only, best-effort) (W1)."""
     instrument = cfg.instrument(inst_row.symbol)
-    redis_client = aioredis.from_url(cfg.secrets.redis_url)
+    redis_client = _get_redis(cfg.secrets.redis_url)
     limiter = RateLimiter(redis_client)
     provider = _make_market_provider(instrument, cfg, limiter)
     try:
@@ -695,7 +685,6 @@ async def _fetch_minute_bars(
         return []
     finally:
         await provider.close()
-        await redis_client.aclose()
 
 
 def _build_pack(

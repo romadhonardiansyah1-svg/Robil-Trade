@@ -175,48 +175,45 @@ async def hmm_train_job() -> None:
 
     from rtrade.core.constants import Timeframe
     from rtrade.indicators.engine import compute as compute_indicators
-    from rtrade.persistence.db import create_engine, create_session_factory
+    from rtrade.persistence.db import _get_engine, create_session_factory
     from rtrade.persistence.repositories import CandleRepo, InstrumentRepo
     from rtrade.regime.hmm import HMMRegimeDetector
 
     cfg = AppConfig.load()
-    engine = create_engine(cfg.secrets.database_url)
+    engine = _get_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
-    try:
-        async with session_factory() as session:
-            for inst in cfg.instruments:
-                row = await InstrumentRepo(session).get_by_symbol(inst.symbol)
-                if row is None:
-                    continue
-                candles = await CandleRepo(session).latest_n(row.id, Timeframe.H1, 5000)
-                if len(candles) < 600:
-                    continue
-                df = pd.DataFrame(
-                    [
-                        {
-                            "ts": c.ts,
-                            "open": float(c.open),
-                            "high": float(c.high),
-                            "low": float(c.low),
-                            "close": float(c.close),
-                            "volume": float(c.volume),
-                        }
-                        for c in candles
-                    ]
-                )
-                df = compute_indicators(df)
-                detector = HMMRegimeDetector()
-                detector.train(df)
-                from pathlib import Path
+    async with session_factory() as session:
+        for inst in cfg.instruments:
+            row = await InstrumentRepo(session).get_by_symbol(inst.symbol)
+            if row is None:
+                continue
+            candles = await CandleRepo(session).latest_n(row.id, Timeframe.H1, 5000)
+            if len(candles) < 600:
+                continue
+            df = pd.DataFrame(
+                [
+                    {
+                        "ts": c.ts,
+                        "open": float(c.open),
+                        "high": float(c.high),
+                        "low": float(c.low),
+                        "close": float(c.close),
+                        "volume": float(c.volume),
+                    }
+                    for c in candles
+                ]
+            )
+            df = compute_indicators(df)
+            detector = HMMRegimeDetector()
+            detector.train(df)
+            from pathlib import Path
 
-                from rtrade.ml.model_io import save_model
+            from rtrade.ml.model_io import save_model
 
-                out = Path("models")
-                out.mkdir(exist_ok=True)
-                save_model(detector, out / f"hmm_{inst.symbol}.joblib")
-                logger.info("hmm trained", symbol=inst.symbol)
-    finally:
-        await engine.dispose()
+            out = Path("models")
+            out.mkdir(exist_ok=True)
+            save_model(detector, out / f"hmm_{inst.symbol}.joblib")
+            logger.info("hmm trained", symbol=inst.symbol)
 
 
 async def audit_chain_verify_job() -> None:
@@ -227,12 +224,12 @@ async def audit_chain_verify_job() -> None:
     from sqlalchemy import select
 
     from rtrade.persistence.audit_chain import verify_chain
-    from rtrade.persistence.db import create_engine, create_session_factory
+    from rtrade.persistence.db import _get_engine, create_session_factory
     from rtrade.persistence.models import SignalAudit
 
     logger.info("audit chain verify started")
     cfg = AppConfig.load()
-    engine = create_engine(cfg.secrets.database_url)
+    engine = _get_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
     try:
         async with session_factory() as session:
@@ -263,8 +260,6 @@ async def audit_chain_verify_job() -> None:
             )
     except Exception as exc:
         logger.error("audit chain verify failed", error=str(exc))
-    finally:
-        await engine.dispose()
 
 
 # A5: named async wrappers so non-scan jobs run through the standardized

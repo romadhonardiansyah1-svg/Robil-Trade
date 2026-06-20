@@ -220,7 +220,13 @@ async def run_worker() -> None:
             pass
 
     await stop_event.wait()
-    scheduler.shutdown()
+    try:
+        scheduler.shutdown()
+    finally:
+        # P0 #6: dispose process-scoped engine/redis singletons on graceful shutdown.
+        from rtrade.persistence.db import shutdown_process_resources
+
+        await shutdown_process_resources()
     logger.info("worker shut down")
 
 

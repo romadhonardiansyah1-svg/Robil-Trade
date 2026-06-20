@@ -41,6 +41,7 @@ from rtrade.indicators.structure import cluster_sr_levels, detect_gaps, detect_s
 from rtrade.llm.budget_guard import BudgetGuard
 from rtrade.llm.cascade import should_escalate
 from rtrade.llm.context_pack import ContextPack, build_context_pack
+from rtrade.llm.key_manager import KeyManager
 from rtrade.llm.model_router import resolve_role_model
 from rtrade.llm.pipeline import PipelineDecision, run_llm_pipeline
 from rtrade.papertrack.excursion import compute_excursion
@@ -98,6 +99,52 @@ def _build_llm_client(cfg: AppConfig) -> Any:
         temperature=cfg.settings.llm.temperature,
         credential_pool=_SCAN_POOL_CACHE,
     )
+
+
+def _llm_cost_store(cfg: AppConfig) -> KeyManager | None:
+    """Build the Redis-backed daily-cost store used to persist/seed LLM spend.
+
+    B2: returns a ``KeyManager`` bound to the process-scoped redis client (the
+    same client used everywhere else in the scan path via ``_get_redis``).
+    ``KeyManager`` keys cost by ``rtrade:cost:{YYYY-MM-DD}`` (UTC) and degrades
+    gracefully to an in-memory dict on any redis failure. If a client cannot be
+    obtained at all, returns ``None`` so the caller falls back to seed=0.0 (the
+    pre-B2 per-scan behavior) without crashing.
+    """
+    try:
+        redis_client = _get_redis(cfg.secrets.redis_url)
+    except Exception:
+        return None
+    return KeyManager(
+        redis_client,
+        daily_budget_usd=cfg.settings.llm.budget.max_usd_per_day,
+    )
+
+
+async def _seed_daily_spend(store: KeyManager | None) -> float:
+    """Read today's persisted LLM spend (UTC date) to seed the budget state.
+
+    Returns a snapshot of ``rtrade:cost:{today}``. No store → 0.0 (graceful
+    degrade). Under heavy concurrency this is a snapshot read, so a slight
+    under-count is possible — that fails CLOSED sooner (never later) because the
+    atomic ``incrbyfloat`` persistence still accumulates correctly.
+    """
+    if store is None:
+        return 0.0
+    return await store.get_daily_cost()
+
+
+async def _persist_scan_spend(store: KeyManager | None, delta_usd: float) -> None:
+    """Persist the USD spent DURING this scan so the next scan seeds from it.
+
+    ``delta_usd`` is ``budget_state.day_usd - seeded`` (the within-scan
+    increment). Guarded ``> 0`` so a zero/negative delta is a no-op. Uses
+    ``KeyManager.report_cost`` which does an atomic ``incrbyfloat`` on the same
+    UTC-date key, so concurrent scans accumulate correctly. No store → no-op.
+    """
+    if store is None or delta_usd <= 0:
+        return
+    await store.report_cost("scan", "scan", delta_usd)
 
 
 # A2: process-scoped RegimeClassifier singleton so per-symbol hysteresis state
@@ -1108,7 +1155,12 @@ async def _run_strategies(
             # the initial call and any flagship escalation so token/USD/wall/
             # step caps accumulate over the whole scan's LLM work.
             budget_guard = BudgetGuard(cfg.settings.llm.budget)
-            budget_state = budget_guard.start_scan()
+            # B2: seed today's already-spent USD (UTC-date keyed, Redis-backed)
+            # so the USD/day cap binds ACROSS scans/process restarts instead of
+            # resetting per scan. No redis → seed 0.0 (pre-B2 behavior).
+            cost_store = _llm_cost_store(cfg)
+            seeded_day_usd = await _seed_daily_spend(cost_store)
+            budget_state = budget_guard.start_scan(day_usd_seed=seeded_day_usd)
             pres = await run_llm_pipeline(
                 candidate,
                 pack,
@@ -1137,6 +1189,10 @@ async def _run_strategies(
                     budget_guard=budget_guard,
                     budget_state=budget_state,
                 )
+            # B2: persist the spend that occurred DURING this scan (delta over
+            # the seed) once, after BOTH pipeline calls, so the next scan seeds
+            # from it. Atomic incrbyfloat → concurrent scans accumulate.
+            await _persist_scan_spend(cost_store, budget_state.day_usd - seeded_day_usd)
             status = _status_for_decision(pres.decision)
             if status != SignalStatus.PUBLISHED:
                 await session_repo.add(

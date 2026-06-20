@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-import threading
 from typing import Any
 
 import pandas as pd
@@ -98,23 +97,12 @@ def _build_llm_client(cfg: AppConfig) -> Any:
 
 
 # A2: process-scoped RegimeClassifier singleton so per-symbol hysteresis state
-# (RegimeClassifier._prev) persists across scans. Scans run sequentially under the
-# APScheduler cron (staggered times), so a shared classifier is safe; this assumes
-# non-concurrent scan execution. _REGIME_LOCK serializes _prev mutation when
-# classify() is offloaded to a worker thread via asyncio.to_thread (A1), so the
-# hysteresis state stays consistent even if scans were to overlap.
+# (RegimeClassifier._prev) persists across scans. classify() mutates this shared
+# _prev dict, so it is intentionally NOT offloaded to a worker thread (A1) — it
+# runs on the single event loop, which serializes the mutation and avoids a data
+# race if scan jobs were to overlap. Pure indicator/structure computations have no
+# shared state and ARE offloaded via asyncio.to_thread.
 _REGIME_CLASSIFIER = RegimeClassifier()
-_REGIME_LOCK = threading.Lock()
-
-
-def _classify_regime(symbol: str, df: pd.DataFrame) -> Any:
-    """Thread-safe wrapper around the singleton classifier (A1/A2).
-
-    Holds _REGIME_LOCK so the shared _prev hysteresis state is mutated under a
-    single writer even when run inside a worker thread.
-    """
-    with _REGIME_LOCK:
-        return _REGIME_CLASSIFIER.classify(symbol, df)
 
 
 # W8: HMM regime shadow cache.
@@ -249,7 +237,12 @@ async def run_scan(
             df_4h_ind = (
                 await asyncio.to_thread(compute_indicators, df_4h) if not df_4h.empty else None
             )
-            regime = await asyncio.to_thread(_classify_regime, symbol, df_1h)
+            # A1: regime classify is intentionally NOT offloaded. _REGIME_CLASSIFIER is a
+            # process-scoped shared singleton whose classify() mutates per-symbol hysteresis
+            # state (self._prev); running it in the threadpool could race on that shared dict
+            # if scan jobs overlap. Keeping it on the single event loop serializes the
+            # mutation safely. Indicators/structure ARE offloaded (pure, no shared state).
+            regime = _REGIME_CLASSIFIER.classify(symbol, df_1h)
 
             # W8: HMM regime shadow classification.
             try:

@@ -79,6 +79,10 @@ def build_scan_schedules(
                     cron = {"minute": "5", "second": "30", "hour": "0,4,8,12,16,20"}
                 else:
                     cron = {"minute": "0", "second": second, "hour": "0,4,8,12,16,20"}
+            elif tf == Timeframe.M5:
+                cron = {"minute": "*/5", "second": second}
+            elif tf == Timeframe.M15:
+                cron = {"minute": "*/15", "second": second}
             else:  # D1
                 cron = {"minute": "1", "second": second, "hour": "0"}
             schedules.append((inst.symbol, tf.value, cron))

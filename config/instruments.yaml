@@ -9,8 +9,10 @@ instruments:
     market: metals
     provider: oanda
     provider_symbol: "XAU_USD"
-    timeframes: ["1h", "4h"]
+    timeframes: ["5m", "15m", "4h"]
     context_timeframe: "1d"
+    entry_timeframes: ["5m", "15m"]
+    anchor_timeframe: "4h"
     pip_size: 0.01            # 1 cent
     quote_currency: USD
     related_currencies: [USD]   # untuk news blackout

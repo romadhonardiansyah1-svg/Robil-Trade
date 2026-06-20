@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import structlog
@@ -58,6 +58,7 @@ from rtrade.persistence.repositories import (
     SignalRepo,
     StrategyStateRepo,
 )
+from rtrade.pipeline.mtf import aligned, h4_trend_bias
 from rtrade.regime.rules import RegimeClassifier
 from rtrade.risk.news_filter import check_news_blackout, high_impact_within
 from rtrade.signals.edge_quality import EdgeQualityConfig
@@ -192,6 +193,34 @@ def _warmup_deficit(
     return None
 
 
+def _warmup_deficit_mtf(
+    *,
+    bars_entry: int,
+    entry_tf: Timeframe,
+    bars_anchor: int,
+    anchor_tf: Timeframe,
+    warmup_bars: int,
+) -> dict[str, int | str] | None:
+    """P1-7 generalized to MTF: abstain until BOTH the entry tf and the anchor tf
+    hold a full warmup window. The entry tf is checked first so its deficit is the
+    one surfaced. Returns the abstain detail, or ``None`` once both are warmed.
+    """
+    if bars_entry < warmup_bars:
+        return {"timeframe": entry_tf.value, "bars": bars_entry, "required": warmup_bars}
+    if bars_anchor < warmup_bars:
+        return {"timeframe": anchor_tf.value, "bars": bars_anchor, "required": warmup_bars}
+    return None
+
+
+def _is_entry_timeframe(instrument: InstrumentConfig, tf: Timeframe) -> bool:
+    """True when ``tf`` is one of the instrument's resolved entry timeframes.
+
+    Legacy default (no entry_timeframes configured) → only H1 is an entry tf,
+    preserving the original H1-entry / H4-context pipeline.
+    """
+    return tf in instrument.resolved_entry_timeframes()
+
+
 async def run_scan(
     symbol: str,
     timeframe: str | Timeframe = Timeframe.H1,
@@ -228,7 +257,12 @@ async def run_scan(
 
             await _ingest_incremental(provider, instrument, inst_row.id, tf, candle_repo, now)
 
-            if tf != Timeframe.H1:
+            entry_tfs = instrument.resolved_entry_timeframes()
+            anchor_tf = instrument.resolved_anchor_timeframe()
+            mtf_mode = bool(instrument.entry_timeframes)
+
+            # Ingest-only for any non-entry timeframe (incl. the anchor tf).
+            if tf not in entry_tfs:
                 await session.commit()
                 return ScanResult(
                     symbol=symbol,
@@ -237,24 +271,27 @@ async def run_scan(
                     detail={"timeframe": tf.value},
                 )
 
-            if tf == Timeframe.H1 and Timeframe.H4 in instrument.timeframes:
-                latest_4h = await candle_repo.latest(inst_row.id, Timeframe.H4)
-                due_4h = latest_4h is None or (
-                    ensure_utc(latest_4h.ts) + 2 * timeframe_duration(Timeframe.H4) <= now
+            # Refresh the anchor tf so the trend bias is current.
+            if anchor_tf != tf and anchor_tf in instrument.timeframes:
+                latest_anchor = await candle_repo.latest(inst_row.id, anchor_tf)
+                due_anchor = latest_anchor is None or (
+                    ensure_utc(latest_anchor.ts) + 2 * timeframe_duration(anchor_tf) <= now
                 )
-                if due_4h:
+                if due_anchor:
                     await _ingest_incremental(
-                        provider, instrument, inst_row.id, Timeframe.H4, candle_repo, now
+                        provider, instrument, inst_row.id, anchor_tf, candle_repo, now
                     )
+
             warmup_bars = cfg.settings.signal.warmup_bars
             load_n = max(500, warmup_bars)
-            df_1h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H1, load_n))
-            df_4h = _candles_to_df(await candle_repo.latest_n(inst_row.id, Timeframe.H4, load_n))
+            df_1h = _candles_to_df(await candle_repo.latest_n(inst_row.id, tf, load_n))
+            df_4h = _candles_to_df(await candle_repo.latest_n(inst_row.id, anchor_tf, load_n))
 
-            deficit = _warmup_deficit(
-                bars_1h=len(df_1h),
-                bars_4h=len(df_4h),
-                has_4h=Timeframe.H4 in instrument.timeframes,
+            deficit = _warmup_deficit_mtf(
+                bars_entry=len(df_1h),
+                entry_tf=tf,
+                bars_anchor=len(df_4h),
+                anchor_tf=anchor_tf,
                 warmup_bars=warmup_bars,
             )
             if deficit is not None:
@@ -265,6 +302,9 @@ async def run_scan(
                     status="abstain_warmup",
                     detail=deficit,
                 )
+
+            # H4 trend bias from the raw anchor closes (pre-indicator; only needs close).
+            bias = h4_trend_bias(df_4h)
 
             df_1h = await asyncio.to_thread(compute_indicators, df_1h)
             df_4h_ind = (
@@ -380,6 +420,9 @@ async def run_scan(
                 funding_extreme=funding_extreme,
                 derivatives_data=derivatives_data,
                 spread=spread,
+                entry_tf=tf,
+                bias=bias,
+                enforce_bias=mtf_mode,
             )
             await session.commit()
 
@@ -827,6 +870,9 @@ async def _run_strategies(
     funding_extreme: bool = False,
     derivatives_data: dict[str, Any] | None = None,
     spread: float | None = None,
+    entry_tf: Timeframe = Timeframe.H1,
+    bias: Literal["UP", "DOWN", "NONE"] = "NONE",
+    enforce_bias: bool = False,
 ) -> ScanResult:
     for strategy_name, strategy_cls in STRATEGY_REGISTRY.items():
         strategy = strategy_cls()
@@ -886,12 +932,32 @@ async def _run_strategies(
             rr_min=cfg.settings.risk.rr_min,
             confluence_min_score=cfg.settings.signal.confluence_min_score,
             valid_bars=valid_bars,
-            timeframe=Timeframe.H1,
+            timeframe=entry_tf,
             edge_quality_enabled=cfg.settings.signal.edge_quality.enabled,
             edge_quality_config=edge_cfg,
             spread=spread,
         )
         if candidate is None:
+            continue
+
+        if enforce_bias and not aligned(bias, candidate.action):
+            await audit_repo.add(
+                stage=AuditStage.CANDIDATE.value,
+                ok=False,
+                signal_id=candidate.candidate_id,
+                detail={
+                    "rejected": "h4_bias_misaligned",
+                    "bias": bias,
+                    "action": candidate.action.value,
+                    "entry_tf": entry_tf.value,
+                },
+            )
+            logger.info(
+                "candidate rejected: H4 bias misaligned",
+                strategy=strategy_name,
+                bias=bias,
+                action=candidate.action.value,
+            )
             continue
 
         # F2: Audit candidate.

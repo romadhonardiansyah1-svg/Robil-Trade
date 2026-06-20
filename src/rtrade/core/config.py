@@ -199,6 +199,9 @@ class InstrumentConfig(_StrictModel):
     related_currencies: list[str] = Field(default_factory=list)
     session_filter: bool = False
     derivatives: bool = False
+    # SP-2 multi-timeframe routing (optional; empty → legacy H1 entry / H4 anchor).
+    entry_timeframes: list[Timeframe] = Field(default_factory=list)
+    anchor_timeframe: Timeframe | None = None
 
     @field_validator("timeframes")
     @classmethod
@@ -206,6 +209,29 @@ class InstrumentConfig(_StrictModel):
         if len(set(v)) != len(v):
             raise ValueError("duplicate timeframes")
         return v
+
+    def resolved_entry_timeframes(self) -> list[Timeframe]:
+        """Entry timeframes to run the full pipeline on; legacy default = [H1]."""
+        return list(self.entry_timeframes) if self.entry_timeframes else [Timeframe.H1]
+
+    def resolved_anchor_timeframe(self) -> Timeframe:
+        """Trend/regime anchor timeframe; legacy default = H4."""
+        return self.anchor_timeframe if self.anchor_timeframe is not None else Timeframe.H4
+
+    @model_validator(mode="after")
+    def _check_mtf(self) -> "InstrumentConfig":
+        if self.entry_timeframes:
+            if len(set(self.entry_timeframes)) != len(self.entry_timeframes):
+                raise ValueError("duplicate entry_timeframes")
+            missing = [tf for tf in self.entry_timeframes if tf not in self.timeframes]
+            if missing:
+                raise ValueError(f"entry_timeframes not in timeframes: {missing}")
+        if self.anchor_timeframe is not None:
+            if self.anchor_timeframe not in self.timeframes:
+                raise ValueError(f"anchor_timeframe not in timeframes: {self.anchor_timeframe}")
+            if self.anchor_timeframe in self.entry_timeframes:
+                raise ValueError("anchor_timeframe must not also be an entry timeframe")
+        return self
 
 
 class InstrumentsFile(_StrictModel):

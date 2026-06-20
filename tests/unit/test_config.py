@@ -48,7 +48,10 @@ class TestRealConfigFiles:
         xau = cfg.instrument("XAUUSD")
         assert xau.market == Market.METALS
         assert xau.provider == "oanda"
-        assert Timeframe.H1 in xau.timeframes
+        # SP-2: XAUUSD now runs M5/M15 entries anchored on H4.
+        assert Timeframe.H4 in xau.timeframes
+        assert xau.resolved_entry_timeframes() == [Timeframe.M5, Timeframe.M15]
+        assert xau.resolved_anchor_timeframe() == Timeframe.H4
         assert xau.session_filter is True
         btc = cfg.instrument("BTCUSDT")
         assert btc.derivatives is True

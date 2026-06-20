@@ -125,9 +125,18 @@ async def _seed_daily_spend(store: KeyManager | None) -> float:
     """Read today's persisted LLM spend (UTC date) to seed the budget state.
 
     Returns a snapshot of ``rtrade:cost:{today}``. No store → 0.0 (graceful
-    degrade). Under heavy concurrency this is a snapshot read, so a slight
-    under-count is possible — that fails CLOSED sooner (never later) because the
-    atomic ``incrbyfloat`` persistence still accumulates correctly.
+    degrade).
+
+    Concurrency: the daily cap binds correctly for SEQUENTIAL scans (the
+    production scheduler runs one scan per instrument×timeframe at a time), and
+    the persisted total is authoritative via atomic ``incrbyfloat``. Under truly
+    concurrent/overlapping scans the seed is a stale snapshot read taken before
+    the other scan persists, so the in-flight cap check can UNDER-count prior
+    spend and overshoot the daily cap (i.e. it does NOT strictly bind under
+    concurrency — it fails open for the overlapping window). The next sequential
+    scan re-seeds from the correct accumulated total. Strict concurrent binding
+    would require checking the atomic store at record time rather than seeding
+    once at scan start (future work).
     """
     if store is None:
         return 0.0

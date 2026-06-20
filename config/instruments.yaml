@@ -7,8 +7,8 @@
 instruments:
   - symbol: XAUUSD
     market: metals
-    provider: twelvedata
-    provider_symbol: "XAU/USD"
+    provider: oanda
+    provider_symbol: "XAU_USD"
     timeframes: ["1h", "4h"]
     context_timeframe: "1d"
     pip_size: 0.01            # 1 cent

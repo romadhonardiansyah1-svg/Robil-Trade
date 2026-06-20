@@ -232,6 +232,17 @@ class Secrets(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     twelvedata_api_key: str = ""
+    twelvedata_api_key_2: str = ""
+    twelvedata_api_key_3: str = ""
+
+    oanda_token_1: str = ""
+    oanda_token_2: str = ""
+    oanda_token_3: str = ""
+    oanda_account_1: str = ""
+    oanda_account_2: str = ""
+    oanda_account_3: str = ""
+    oanda_env: Literal["practice", "live"] = "practice"
+
     finnhub_api_key: str = ""
 
     gemini_api_key_1: str = ""
@@ -310,6 +321,23 @@ class Secrets(BaseSettings):
             "xai": [self.xai_api_key_1, self.xai_api_key_2, self.xai_api_key_3],
         }
         return [k for k in slots.get(family, []) if k]
+
+    def market_keys_for(self, provider: str) -> list[tuple[str, str | None]]:
+        """Market-data credential legs for a provider, ordered, empty slots dropped.
+
+        Returns (token, account_or_None) pairs. Mirrors keys_for() for LLM keys.
+        """
+        if provider == "oanda":
+            pairs = [
+                (self.oanda_token_1, self.oanda_account_1),
+                (self.oanda_token_2, self.oanda_account_2),
+                (self.oanda_token_3, self.oanda_account_3),
+            ]
+            return [(t, a or None) for t, a in pairs if t]
+        if provider == "twelvedata":
+            keys = [self.twelvedata_api_key, self.twelvedata_api_key_2, self.twelvedata_api_key_3]
+            return [(k, None) for k in keys if k]
+        return []
 
 
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:

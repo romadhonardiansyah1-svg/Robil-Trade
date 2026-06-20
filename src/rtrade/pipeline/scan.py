@@ -26,9 +26,11 @@ from rtrade.core.timeutil import ensure_utc, timeframe_duration
 from rtrade.data.base import CalendarProvider, MarketDataProvider
 from rtrade.data.ccxt_provider import CcxtProvider
 from rtrade.data.composite_calendar import CompositeCalendarProvider
+from rtrade.data.composite_market import CompositeMarketDataProvider
 from rtrade.data.finnhub_calendar import FinnhubCalendarProvider
 from rtrade.data.ingestion import ingest_candles
-from rtrade.data.ratelimit import RateLimiter
+from rtrade.data.oanda_provider import OandaProvider
+from rtrade.data.ratelimit import RateLimiter, market_bucket
 from rtrade.data.twelvedata_provider import TwelveDataProvider
 from rtrade.delivery.formatter import format_candidate_deterministic
 from rtrade.delivery.telegram_bot import TelegramDelivery
@@ -1258,10 +1260,41 @@ def _make_market_provider(
     cfg: AppConfig,
     limiter: RateLimiter,
 ) -> MarketDataProvider:
-    if instrument.provider == "twelvedata":
-        return TwelveDataProvider(cfg.secrets.twelvedata_api_key, limiter)
     if instrument.provider == "ccxt_binance":
         return CcxtProvider(limiter)
+
+    legs: list[tuple[str, MarketDataProvider]] = []
+    if instrument.provider == "oanda":
+        practice = cfg.secrets.oanda_env == "practice"
+        for i, (token, account) in enumerate(cfg.secrets.market_keys_for("oanda"), start=1):
+            legs.append(
+                (
+                    f"oanda_{i}",
+                    OandaProvider(
+                        token,
+                        account or "",
+                        limiter,
+                        bucket=market_bucket("oanda", i),
+                        practice=practice,
+                    ),
+                )
+            )
+        # TwelveData as last-resort fallback after all OANDA accounts.
+        for j, (key, _acc) in enumerate(cfg.secrets.market_keys_for("twelvedata"), start=1):
+            legs.append((f"twelvedata_{j}", TwelveDataProvider(key, limiter)))
+        if not legs:
+            raise ConfigError(
+                "provider 'oanda' selected but no OANDA_TOKEN_*/ACCOUNT_* (or TwelveData) configured"
+            )
+        return CompositeMarketDataProvider(legs)
+
+    if instrument.provider == "twelvedata":
+        for j, (key, _acc) in enumerate(cfg.secrets.market_keys_for("twelvedata"), start=1):
+            legs.append((f"twelvedata_{j}", TwelveDataProvider(key, limiter)))
+        if not legs:
+            raise ConfigError("provider 'twelvedata' selected but no TWELVEDATA_API_KEY configured")
+        return CompositeMarketDataProvider(legs)
+
     raise ConfigError(f"unsupported market data provider: {instrument.provider}")
 
 

@@ -40,6 +40,19 @@ CCXT_BINANCE_BUCKET = BucketConfig.per_minute("ccxt_binance", 1000)
 FINNHUB_BUCKET = BucketConfig.per_minute("finnhub", 50)
 BINANCE_PUBLIC_BUCKET = BucketConfig.per_minute("binance_public", 500)
 
+# OANDA v20: documented 120 req/s. Bucket at 100/s = 6000/min (safety margin).
+OANDA_BUCKET = BucketConfig.per_minute("oanda", 6000)
+
+_VENDOR_RPM: dict[str, int] = {"oanda": 6000, "twelvedata": 7}
+_VENDOR_BUCKET_PREFIX: dict[str, str] = {"oanda": "oanda_acc", "twelvedata": "twelvedata_k"}
+
+
+def market_bucket(provider: str, index: int) -> BucketConfig:
+    """Per-account/key bucket so each leg rate-limits independently."""
+    rpm = _VENDOR_RPM.get(provider, 7)
+    prefix = _VENDOR_BUCKET_PREFIX.get(provider, f"{provider}_")
+    return BucketConfig.per_minute(f"{prefix}{index}", rpm)
+
 
 _LUA_ACQUIRE = """
 -- Token bucket acquire script (atomic).

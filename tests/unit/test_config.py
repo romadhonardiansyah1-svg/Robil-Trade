@@ -47,7 +47,7 @@ class TestRealConfigFiles:
         assert len(cfg.instruments) == 6  # P1: 3 + P3: 3
         xau = cfg.instrument("XAUUSD")
         assert xau.market == Market.METALS
-        assert xau.provider == "twelvedata"
+        assert xau.provider == "oanda"
         assert Timeframe.H1 in xau.timeframes
         assert xau.session_filter is True
         btc = cfg.instrument("BTCUSDT")

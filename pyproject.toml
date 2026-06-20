@@ -46,6 +46,12 @@ dependencies = [
 rtrade = "rtrade.cli.__main__:main"
 
 [dependency-groups]
+# Optional, NOT part of the mandatory runtime deps or base install/CI.
+# River/ADWIN regime drift detector (PLAN P3-5, SHADOW ONLY). river is BSD-3.
+# Install with: uv sync --group drift
+drift = [
+    "river>=0.21",
+]
 dev = [
     "ruff>=0.8",
     "mypy>=1.13",
@@ -124,6 +130,8 @@ module = [
     "joblib",
     "pandas",
     "pandas.*",
+    "river",
+    "river.*",
     "sklearn",
     "sklearn.*",
     "google.auth",

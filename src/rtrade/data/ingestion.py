@@ -87,10 +87,6 @@ def detect_candle_gaps(
     return gaps
 
 
-# Backwards-compatible alias (deprecated — use detect_candle_gaps).
-detect_gaps = detect_candle_gaps
-
-
 async def ingest_candles(
     provider: MarketDataProvider,
     instrument: InstrumentConfig,
@@ -152,7 +148,7 @@ async def ingest_candles(
 
     # Detect gaps.
     is_crypto = instrument.market == "crypto"
-    gaps = detect_gaps(candles, timeframe, is_crypto=is_crypto)
+    gaps = detect_candle_gaps(candles, timeframe, is_crypto=is_crypto)
     for gap_start, gap_end in gaps:
         logger.warning(
             "data gap detected",

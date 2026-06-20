@@ -78,14 +78,17 @@ class RegimeClassifier:
         atr_pct = float(last.get("atr_percentile", 50))
 
         # Compute 24h return and its 90-day rolling stdev.
-        # P2-2 fix: close[-1] vs close[-24] for true 24-bar return on H1 data.
+        # P2-2 fix: a true 24-interval span uses close[-1] vs close[-(lookback_bars+1)]
+        # (=-25), consistent with pct_change(lookback_bars) which compares t vs t-24.
         close = df["close"].astype(float)
         return_24h: float | None = None
         return_stdev: float | None = None
         lookback_bars = 24  # 24h on H1 timeframe
         if len(close) >= lookback_bars + 1:
             return_24h = float(
-                (close.iloc[-1] - close.iloc[-lookback_bars]) / close.iloc[-lookback_bars] * 100
+                (close.iloc[-1] - close.iloc[-(lookback_bars + 1)])
+                / close.iloc[-(lookback_bars + 1)]
+                * 100
             )
             if len(close) >= 90:
                 returns = close.pct_change(lookback_bars).dropna().iloc[-90:]

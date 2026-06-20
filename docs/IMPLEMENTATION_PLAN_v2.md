@@ -211,19 +211,23 @@ Exception
 - **Redis**: `fakeredis.aioredis` atau container. Rate limiter tests pakai fakeredis agar clock-skew terkontrol.
 - **LLM**: mock `LLMClient` / `run_llm_pipeline` — jangan enable `llm.enabled`.
 
-## 2.6 P0+P1 stability fixes yang SUDAH JADI (jangan re-litigate)
+## 2.6 P0+P1 stability fixes — STATUS (post-audit, most NOT yet implemented)
 
-Branch `fix/bot-stability-accuracy` sudah berisi (atau akan berisi saat dokumen ini dipakai):
-- **#1** CPU sync offload via `asyncio.to_thread` di `run_scan` (indicators, regime, structure).
-- **#2** `_REGIME_CLASSIFIER` singleton (hysteresis persist).
-- **#3** Calendar fail-close safety net + startup validation.
-- **#4** Rate limiter: timeout 25s, server-side Redis `TIME` (clock-skew), hapus double rate-limit retry di providers.
-- **#5** Rate-limit alert dedup (jangan suppress total).
-- **#6** Engine/Redis/Regime singletons + graceful shutdown `shutdown_process_resources`.
-- **#11** `_run_job` wrapper untuk job non-scan (error handling + alert).
-- **#15** Calendar key validation (Finnhub malformed key → 401/403 terdeteksi).
+> Audit post-audit found these were marketed as done but are pending; see remediation phases.
 
-**Ini adalah baseline.** v2 (dokumen ini) membangun di atasnya. Jangan re-implement; bila ada item yang overlap, verifikasi dulu sudah jadi.
+Branch `fix/bot-stability-accuracy` was claimed to contain the items below. Verified
+status against the actual code:
+- **#1** CPU sync offload via `asyncio.to_thread` in `run_scan` (indicators, regime, structure) — **NOT IMPLEMENTED** (no `to_thread`/`run_in_executor` in `src`; `scan.py` runs CPU work inline).
+- **#2** `_REGIME_CLASSIFIER` singleton (hysteresis persist) — **NOT IMPLEMENTED** (`scan.py` constructs `RegimeClassifier()` per scan; hysteresis state never persists).
+- **#3** Calendar fail-close safety net + startup validation — **PARTIAL** (`fail_open_when_stale=false` is honored, but startup logs CRITICAL at `main.py` and does NOT halt).
+- **#4** Rate limiter: timeout 25s, server-side Redis `TIME` (clock-skew), remove double rate-limit retry in providers — **NOT IMPLEMENTED** (`ratelimit.py` uses client-side `time.time()`; no `TIME`, no timeout cap).
+- **#5** Rate-limit alert dedup (don't suppress entirely) — **NOT WIRED** (`AlertManager` exists in `monitoring/alerts.py` but is imported nowhere; live path is `_send_failure_alert` without dedup).
+- **#6** Engine/Redis/Regime singletons + graceful shutdown `shutdown_process_resources` — **NOT IMPLEMENTED** (no `_get_engine`/`_get_redis`; engines/redis created per call in `scan.py`/`jobs.py`).
+- **#11** `_run_job` wrapper for non-scan jobs (error handling + alert) — **NOT IMPLEMENTED** (no `_run_job` in `scheduler/jobs.py`).
+- **#15** Calendar key validation (Finnhub malformed key → 401/403 detected) — **UNVERIFIED**.
+
+**This is NOT a completed baseline.** v2 (this document) and the remediation phases must
+implement these items; do not assume they exist. Verify before relying on any item above.
 
 ## 2.7 Open question yang gating P0
 

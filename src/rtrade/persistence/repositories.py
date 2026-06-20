@@ -7,7 +7,7 @@ Transaction control (commit/rollback) belongs to the caller.
 """
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -415,6 +415,9 @@ class CalendarSourceHealthRepo:
         existing.last_error = last_error
         existing.consecutive_failures = consecutive_failures
         existing.last_attempt = last_attempt
+        # Refresh updated_at deterministically on both insert and update paths
+        # (model has server_default but no onupdate; keep it testable).
+        existing.updated_at = datetime.now(UTC)
 
     async def all(self) -> list[CalendarSourceHealth]:
         result = await self._session.execute(select(CalendarSourceHealth))

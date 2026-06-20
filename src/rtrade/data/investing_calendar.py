@@ -94,6 +94,25 @@ def _event_id(event_name: str, event_time: str, currency: str) -> str:
     ]
 
 
+def _parse_event_time(date_str: str, time_str: str) -> datetime:
+    """Parse a calendar date/time into a UTC-aware datetime.
+
+    Tries the strict "%Y-%m-%d %H:%M:%S" format first (naive treated as UTC) to
+    preserve existing behavior, then falls back to ISO-8601 parsing (handling a
+    trailing 'Z' and offsets). Raises ValueError if neither format applies.
+    """
+    full_dt_str = f"{date_str} {time_str}"
+    try:
+        return datetime.strptime(full_dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+    except ValueError:
+        pass
+    normalized = full_dt_str.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _safe_decimal(val: object) -> Decimal | None:
     if val is None or val == "":
         return None
@@ -171,7 +190,7 @@ class InvestingCalendarProvider(CalendarProvider):
                 if not event_name or not date_str:
                     continue
                 full_dt_str = f"{date_str} {time_str}"
-                event_time = datetime.strptime(full_dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+                event_time = _parse_event_time(date_str, time_str)
                 events.append(
                     DomainEvent(
                         event_id=_event_id(event_name, full_dt_str, currency),

@@ -12,6 +12,7 @@ duplicate signals (dedup key: instrument, timeframe, strategy, bar_ts).
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -90,6 +91,24 @@ async def _send_failure_alert(message: str) -> None:
                 await tg.close()
     except Exception:
         logger.exception("failed to send failure alert")
+
+
+async def _run_job(name: str, coro_fn: Callable[[], Awaitable[None]]) -> None:
+    """Standardized wrapper for non-scan jobs: log start/end, catch and log
+    exceptions, and emit a best-effort failure alert so a crashing job never
+    silently dies inside APScheduler.
+    """
+    logger.info("job started", job=name)
+    try:
+        await coro_fn()
+        logger.info("job completed", job=name)
+    except Exception as exc:
+        logger.exception("job failed", job=name)
+        # Best-effort alert; an alert failure must never mask the original error.
+        try:
+            await _send_failure_alert(f"⚠️ job {name} gagal: {exc}")
+        except Exception:
+            logger.exception("failed to send job failure alert", job=name)
 
 
 async def calendar_sync_job() -> None:
@@ -213,3 +232,28 @@ async def audit_chain_verify_job() -> None:
         logger.error("audit chain verify failed", error=str(exc))
     finally:
         await engine.dispose()
+
+
+# A5: named async wrappers so non-scan jobs run through the standardized
+# _run_job error/alert handling. Registered in scheduler.main.create_scheduler().
+# (scan_job is intentionally NOT wrapped — it owns its _fail_counts/cooldown logic.)
+
+
+async def calendar_sync_job_wrapped() -> None:
+    await _run_job("calendar_sync", calendar_sync_job)
+
+
+async def paper_track_job_wrapped() -> None:
+    await _run_job("paper_track", paper_track_job)
+
+
+async def health_check_job_wrapped() -> None:
+    await _run_job("health_check", health_check_job)
+
+
+async def hmm_train_job_wrapped() -> None:
+    await _run_job("hmm_train", hmm_train_job)
+
+
+async def audit_chain_verify_job_wrapped() -> None:
+    await _run_job("audit_chain_verify", audit_chain_verify_job)

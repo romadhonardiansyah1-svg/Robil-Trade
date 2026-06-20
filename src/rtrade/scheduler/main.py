@@ -18,11 +18,11 @@ import structlog
 from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Timeframe
 from rtrade.scheduler.jobs import (
-    audit_chain_verify_job,
-    calendar_sync_job,
-    health_check_job,
-    hmm_train_job,
-    paper_track_job,
+    audit_chain_verify_job_wrapped,
+    calendar_sync_job_wrapped,
+    health_check_job_wrapped,
+    hmm_train_job_wrapped,
+    paper_track_job_wrapped,
     scan_job,
 )
 
@@ -104,7 +104,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     # Calendar sync: 2×/day at 00:15 and 12:15 UTC.
     scheduler.add_job(
-        calendar_sync_job,
+        calendar_sync_job_wrapped,
         trigger=CronTrigger(hour="0,12", minute="15", timezone="UTC"),
         id="calendar_sync",
         name="Calendar sync",
@@ -113,7 +113,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     # Paper tracker: every 15 minutes.
     scheduler.add_job(
-        paper_track_job,
+        paper_track_job_wrapped,
         trigger=IntervalTrigger(minutes=15),
         id="paper_track",
         name="Paper tracker",
@@ -122,7 +122,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     # Health check: every 5 minutes.
     scheduler.add_job(
-        health_check_job,
+        health_check_job_wrapped,
         trigger=IntervalTrigger(minutes=5),
         id="health_check",
         name="Health check",
@@ -131,7 +131,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     # W8: HMM retrain: weekly Sunday 02:00 UTC.
     scheduler.add_job(
-        hmm_train_job,
+        hmm_train_job_wrapped,
         trigger=CronTrigger(day_of_week="sun", hour="2", minute="0", timezone="UTC"),
         id="hmm_train",
         name="HMM weekly retrain",
@@ -140,7 +140,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     # P2-8: Audit chain integrity verification: weekly Sunday 03:00 UTC.
     scheduler.add_job(
-        audit_chain_verify_job,
+        audit_chain_verify_job_wrapped,
         trigger=CronTrigger(day_of_week="sun", hour="3", minute="0", timezone="UTC"),
         id="audit_chain_verify",
         name="Audit chain verify",

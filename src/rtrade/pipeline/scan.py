@@ -96,6 +96,12 @@ def _build_llm_client(cfg: AppConfig) -> Any:
     )
 
 
+# A2: process-scoped RegimeClassifier singleton so per-symbol hysteresis state
+# (RegimeClassifier._prev) persists across scans. Scans run sequentially under the
+# APScheduler cron (staggered times), so a shared classifier is safe; this assumes
+# non-concurrent scan execution.
+_REGIME_CLASSIFIER = RegimeClassifier()
+
 # W8: HMM regime shadow cache.
 _HMM_CACHE: dict[str, Any] = {}
 
@@ -226,7 +232,7 @@ async def run_scan(
 
             df_1h = compute_indicators(df_1h)
             df_4h_ind = compute_indicators(df_4h) if not df_4h.empty else None
-            regime = RegimeClassifier().classify(symbol, df_1h)
+            regime = _REGIME_CLASSIFIER.classify(symbol, df_1h)
 
             # W8: HMM regime shadow classification.
             try:

@@ -19,11 +19,20 @@ Hard-block: high-impact news event < 12h ahead (range breakout risk).
 
 from __future__ import annotations
 
+from typing import Literal
+
+import numpy as np
 import pandas as pd
 
 from rtrade.core.constants import Action, Regime
 from rtrade.signals.schemas import LevelSet
 from rtrade.strategies.base import EntryIntent, Strategy, StrategyConfig
+from rtrade.strategies.filters import (
+    bollinger_touch,
+    choppiness_index,
+    keltner_touch,
+    rsi_divergence,
+)
 
 
 class S2RangeMR(Strategy):
@@ -51,6 +60,19 @@ class S2RangeMR(Strategy):
         df.attrs["s2_band_tolerance_atr_mult"] = cfg.get_float("entry.band_tolerance_atr_mult", 0.5)
         df.attrs["s2_sl_atr_mult"] = cfg.get_float("levels.sl_atr_mult", 1.0)
         df.attrs["s2_rr_min"] = cfg.get_float("levels.rr_min", 1.5)
+
+        # SP-5 opt-in confirmations (default OFF → preserves current behavior).
+        df.attrs["s2_bb_enabled"] = bool(cfg.get("confirmation.bollinger_touch_enabled", False))
+        df.attrs["s2_bb_period"] = cfg.get_int("confirmation.bb_period", 20)
+        df.attrs["s2_bb_std"] = cfg.get_float("confirmation.bb_std", 2.0)
+        df.attrs["s2_kc_enabled"] = bool(cfg.get("confirmation.keltner_touch_enabled", False))
+        df.attrs["s2_kc_period"] = cfg.get_int("confirmation.keltner_period", 20)
+        df.attrs["s2_kc_mult"] = cfg.get_float("confirmation.keltner_multiplier", 1.5)
+        df.attrs["s2_rsidiv_enabled"] = bool(cfg.get("confirmation.rsi_divergence_enabled", False))
+        df.attrs["s2_rsidiv_lookback"] = cfg.get_int("confirmation.rsi_divergence_lookback", 20)
+        df.attrs["s2_chop_enabled"] = bool(cfg.get("confirmation.choppiness_enabled", False))
+        df.attrs["s2_chop_period"] = cfg.get_int("confirmation.choppiness_period", 14)
+        df.attrs["s2_chop_min"] = cfg.get_float("confirmation.choppiness_min", 61.8)
 
         # Donchian channel for band detection.
         df["donch_high"] = df["high"].rolling(donchian).max()
@@ -94,7 +116,7 @@ class S2RangeMR(Strategy):
             (Action.BUY, "LONG"),
             (Action.SELL, "SHORT"),
         ]:
-            if self._check_entry(df, action):
+            if self._check_entry(df, action) and self._passes_confirmations(df, action):
                 return EntryIntent(
                     action=action,
                     reason=f"S2 Range Mean-Reversion {direction} at band edge",
@@ -163,6 +185,40 @@ class S2RangeMR(Strategy):
                 return False
             # Close back inside band.
             return close <= band_high
+
+    def _passes_confirmations(self, df: pd.DataFrame, action: Action) -> bool:
+        """SP-5 opt-in confirmations. Returns True when nothing is enabled."""
+        side: Literal["lower", "upper"] = "lower" if action == Action.BUY else "upper"
+
+        if bool(df.attrs.get("s2_bb_enabled", False)) and not bollinger_touch(
+            df,
+            period=int(df.attrs.get("s2_bb_period", 20)),
+            std=float(df.attrs.get("s2_bb_std", 2.0)),
+            side=side,
+        ):
+            return False
+
+        if bool(df.attrs.get("s2_kc_enabled", False)) and not keltner_touch(
+            df,
+            period=int(df.attrs.get("s2_kc_period", 20)),
+            multiplier=float(df.attrs.get("s2_kc_mult", 1.5)),
+            side=side,
+        ):
+            return False
+
+        if bool(df.attrs.get("s2_rsidiv_enabled", False)):
+            div = rsi_divergence(df, lookback=int(df.attrs.get("s2_rsidiv_lookback", 20)))
+            want = "bullish" if action == Action.BUY else "bearish"
+            if div != want:
+                return False
+
+        if bool(df.attrs.get("s2_chop_enabled", False)):
+            ci = choppiness_index(df, period=int(df.attrs.get("s2_chop_period", 14)))
+            last_ci = float(ci.iloc[-1])
+            if np.isnan(last_ci) or last_ci < float(df.attrs.get("s2_chop_min", 61.8)):
+                return False
+
+        return True
 
     def custom_entry_price(self, df: pd.DataFrame, intent: EntryIntent) -> LevelSet:
         """Compute levels: entry=band edge, SL=edge-1.0×ATR, TP=mid-band."""

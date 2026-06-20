@@ -30,6 +30,7 @@ from rtrade.core.constants import Action, Regime
 from rtrade.indicators.structure import detect_swing_points
 from rtrade.signals.schemas import LevelSet
 from rtrade.strategies.base import EntryIntent, Strategy, StrategyConfig
+from rtrade.strategies.filters import adx_ok, choppiness_index, supertrend
 
 
 class S1TrendPullback(Strategy):
@@ -54,6 +55,17 @@ class S1TrendPullback(Strategy):
         df.attrs["s1_sl_fallback_atr"] = cfg.get_float("levels.sl_fallback_atr", 1.0)
         df.attrs["s1_rr_target"] = cfg.get_float("levels.rr_target", 2.0)
 
+        # SP-5 opt-in confirmations (default OFF → preserves current behavior).
+        df.attrs["s1_st_enabled"] = bool(cfg.get("confirmation.supertrend_enabled", False))
+        df.attrs["s1_st_period"] = cfg.get_int("confirmation.supertrend_period", 10)
+        df.attrs["s1_st_mult"] = cfg.get_float("confirmation.supertrend_multiplier", 3.0)
+        df.attrs["s1_adx_filter_enabled"] = bool(cfg.get("confirmation.adx_filter_enabled", False))
+        df.attrs["s1_adx_threshold"] = cfg.get_float("confirmation.adx_threshold", 25.0)
+        df.attrs["s1_chop_enabled"] = bool(cfg.get("confirmation.choppiness_enabled", False))
+        df.attrs["s1_chop_period"] = cfg.get_int("confirmation.choppiness_period", 14)
+        df.attrs["s1_chop_max"] = cfg.get_float("confirmation.choppiness_max", 38.2)
+        df.attrs["s1_mtf_enabled"] = bool(cfg.get("confirmation.mtf_ema_bias_enabled", False))
+
         # Pullback zone boundaries.
         df["zone_low"] = df[f"ema{ema_fast}"]
         df["zone_high"] = df[f"ema{ema_mid}"]
@@ -70,7 +82,11 @@ class S1TrendPullback(Strategy):
 
         # We check LONG and SHORT separately.
         for action, direction in [(Action.BUY, "LONG"), (Action.SELL, "SHORT")]:
-            if self._check_trend_filter(df, action) and self._check_pullback_setup(df, action):
+            if (
+                self._check_trend_filter(df, action)
+                and self._check_pullback_setup(df, action)
+                and self._passes_confirmations(df, action)
+            ):
                 return EntryIntent(
                     action=action,
                     reason=f"S1 Trend-Pullback {direction} setup triggered",
@@ -174,6 +190,43 @@ class S1TrendPullback(Strategy):
             if close_last < ema21_last:
                 return True
             return self._is_engulfing(df, action)
+
+    def _passes_confirmations(self, df: pd.DataFrame, action: Action) -> bool:
+        """SP-5 opt-in confirmations. Returns True when nothing is enabled."""
+        if bool(df.attrs.get("s1_st_enabled", False)):
+            direction = supertrend(
+                df,
+                period=int(df.attrs.get("s1_st_period", 10)),
+                multiplier=float(df.attrs.get("s1_st_mult", 3.0)),
+            )
+            want = 1 if action == Action.BUY else -1
+            if int(direction.iloc[-1]) != want:
+                return False
+
+        if bool(df.attrs.get("s1_adx_filter_enabled", False)) and not adx_ok(
+            df, threshold=float(df.attrs.get("s1_adx_threshold", 25.0))
+        ):
+            return False
+
+        if bool(df.attrs.get("s1_chop_enabled", False)):
+            ci = choppiness_index(df, period=int(df.attrs.get("s1_chop_period", 14)))
+            last_ci = float(ci.iloc[-1])
+            if np.isnan(last_ci) or last_ci > float(df.attrs.get("s1_chop_max", 38.2)):
+                return False
+
+        return not (
+            bool(df.attrs.get("s1_mtf_enabled", False)) and not self._mtf_bias_ok(df, action)
+        )
+
+    @staticmethod
+    def _mtf_bias_ok(df: pd.DataFrame, action: Action) -> bool:
+        """Higher-TF EMA bias gate. Permissive when no bias is injected (SP-2 fills it)."""
+        bias = df.attrs.get("s1_htf_bias")
+        if bias is None:
+            return True
+        if action == Action.BUY:
+            return bool(bias == "UP")
+        return bool(bias == "DOWN")
 
     @staticmethod
     def _is_engulfing(df: pd.DataFrame, action: Action) -> bool:

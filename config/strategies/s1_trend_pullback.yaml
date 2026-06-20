@@ -29,6 +29,20 @@ levels:
   rr_target: 2.0
   valid_bars: 6             # limit tak tersentuh dalam 6 bar → sinyal expired
 
+# SP-5 opt-in confirmations. ALL default OFF — enabling any requires a fresh
+# walk-forward backtest pass (SP-6) before going live. Disabled = behavior
+# identical to the original S1.
+confirmation:
+  supertrend_enabled: false
+  supertrend_period: 10
+  supertrend_multiplier: 3.0
+  adx_filter_enabled: false
+  adx_threshold: 25.0
+  choppiness_enabled: false
+  choppiness_period: 14
+  choppiness_max: 38.2          # CI below this = trending enough to trade
+  mtf_ema_bias_enabled: false   # HTF bias injected via df.attrs["s1_htf_bias"] by SP-2
+
 confluence_weights:         # total 100 — §8.6
   trend: 25
   momentum: 20

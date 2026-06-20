@@ -18,5 +18,21 @@ levels:
   rr_min: 1.5                    # Minimum R:R (else DISCARD)
   valid_bars: 6                  # Signal valid for N bars of 1H
 
+# SP-5 opt-in confirmations. ALL default OFF — enabling any requires a fresh
+# walk-forward backtest pass (SP-6) before going live. Disabled = behavior
+# identical to the original S2.
+confirmation:
+  bollinger_touch_enabled: false
+  bb_period: 20
+  bb_std: 2.0
+  keltner_touch_enabled: false
+  keltner_period: 20
+  keltner_multiplier: 1.5
+  rsi_divergence_enabled: false
+  rsi_divergence_lookback: 20
+  choppiness_enabled: false
+  choppiness_period: 14
+  choppiness_min: 61.8          # CI above this = choppy enough to be a real range
+
 news:
   hard_block_hours: 12           # Block if high-impact event < N hours ahead

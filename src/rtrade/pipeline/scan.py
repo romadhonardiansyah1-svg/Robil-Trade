@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+import threading
 from typing import Any
 
 import pandas as pd
@@ -98,8 +100,22 @@ def _build_llm_client(cfg: AppConfig) -> Any:
 # A2: process-scoped RegimeClassifier singleton so per-symbol hysteresis state
 # (RegimeClassifier._prev) persists across scans. Scans run sequentially under the
 # APScheduler cron (staggered times), so a shared classifier is safe; this assumes
-# non-concurrent scan execution.
+# non-concurrent scan execution. _REGIME_LOCK serializes _prev mutation when
+# classify() is offloaded to a worker thread via asyncio.to_thread (A1), so the
+# hysteresis state stays consistent even if scans were to overlap.
 _REGIME_CLASSIFIER = RegimeClassifier()
+_REGIME_LOCK = threading.Lock()
+
+
+def _classify_regime(symbol: str, df: pd.DataFrame) -> Any:
+    """Thread-safe wrapper around the singleton classifier (A1/A2).
+
+    Holds _REGIME_LOCK so the shared _prev hysteresis state is mutated under a
+    single writer even when run inside a worker thread.
+    """
+    with _REGIME_LOCK:
+        return _REGIME_CLASSIFIER.classify(symbol, df)
+
 
 # W8: HMM regime shadow cache.
 _HMM_CACHE: dict[str, Any] = {}
@@ -229,9 +245,11 @@ async def run_scan(
                     detail={"candles_1h": len(df_1h)},
                 )
 
-            df_1h = compute_indicators(df_1h)
-            df_4h_ind = compute_indicators(df_4h) if not df_4h.empty else None
-            regime = _REGIME_CLASSIFIER.classify(symbol, df_1h)
+            df_1h = await asyncio.to_thread(compute_indicators, df_1h)
+            df_4h_ind = (
+                await asyncio.to_thread(compute_indicators, df_4h) if not df_4h.empty else None
+            )
+            regime = await asyncio.to_thread(_classify_regime, symbol, df_1h)
 
             # W8: HMM regime shadow classification.
             try:
@@ -250,9 +268,9 @@ async def run_scan(
                 logger.warning("hmm shadow failed", error=str(exc))
 
             atr = float(df_1h.iloc[-1].get("atr", 0.0))
-            swings = detect_swing_points(df_1h.tail(200))
-            sr_levels = cluster_sr_levels(swings, atr)
-            gap_zones = detect_gaps(df_1h.tail(200), atr)
+            swings = await asyncio.to_thread(detect_swing_points, df_1h.tail(200))
+            sr_levels = await asyncio.to_thread(cluster_sr_levels, swings, atr)
+            gap_zones = await asyncio.to_thread(detect_gaps, df_1h.tail(200), atr)
 
             events = await EventRepo(session).get_window(
                 now - timedelta(hours=2), now + timedelta(hours=72)

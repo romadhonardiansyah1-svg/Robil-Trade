@@ -56,6 +56,25 @@ async def test_fetch_ohlcv_parses_complete_candles_ascending() -> None:
     assert candles[0].ts < candles[1].ts
 
 
+@pytest.mark.parametrize("timeframe", [Timeframe.H4, Timeframe.D1])
+@pytest.mark.asyncio
+async def test_fetch_ohlcv_sends_utc_alignment_params(timeframe: Timeframe) -> None:
+    """D2: D and H4 candles MUST align to the UTC day boundary, not OANDA's
+    default 17:00 America/New_York. The request must carry alignmentTimezone=UTC
+    and dailyAlignment=0 so anti-look-ahead cutoffs, DST gap detection, and
+    cross-provider MTF alignment stay correct."""
+    with respx.mock(base_url=OANDA_PRACTICE_URL) as mock:
+        route = mock.get("/v3/instruments/XAU_USD/candles").mock(
+            return_value=httpx.Response(200, json=_CANDLES)
+        )
+        p = OandaProvider("tok", "acc", _NoLimit())  # type: ignore[arg-type]
+        await p.fetch_ohlcv("XAU_USD", timeframe, datetime(2025, 1, 1, tzinfo=UTC))
+        await p.close()
+    request_url = route.calls.last.request.url
+    assert request_url.params["alignmentTimezone"] == "UTC"
+    assert request_url.params["dailyAlignment"] == "0"
+
+
 @pytest.mark.asyncio
 async def test_fetch_ohlcv_http_400_raises_provider_error() -> None:
     with respx.mock(base_url=OANDA_PRACTICE_URL) as mock:

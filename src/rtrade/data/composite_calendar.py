@@ -21,13 +21,21 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class CalendarSourceHealth:
-    """Per-source health telemetry."""
+    """Per-source health telemetry.
+
+    ``last_success`` records the last VERIFIED (non-empty) fetch. A source that
+    returns an empty list WITHOUT raising is recorded via ``last_attempt`` /
+    ``last_empty`` only — it does NOT advance ``last_success``. This keeps the
+    downstream staleness gate fail-CLOSED: a silently-broken source returning
+    ``[]`` cannot masquerade as "fresh with zero events" (defect B1).
+    """
 
     name: str
     last_success: datetime | None = None
     last_error: str | None = None
     consecutive_failures: int = 0
     last_attempt: datetime | None = None
+    last_empty: datetime | None = None
 
 
 AlertCallback = Callable[[str], Awaitable[None]]
@@ -60,6 +68,7 @@ class CompositeCalendarProvider(CalendarProvider):
 
     async def fetch_events(self, start: date, end: date) -> list[DomainEvent]:
         failed_sources: list[str] = []
+        empty_sources: list[str] = []
         for name, provider in self._sources:
             health = self._health[name]
             health.last_attempt = datetime.now(UTC)
@@ -81,6 +90,18 @@ class CompositeCalendarProvider(CalendarProvider):
                 )
                 failed_sources.append(name)
                 continue
+            # FAILOVER ON EMPTY (B1): an empty list WITHOUT error is NOT a verified
+            # success. Do not advance last_success and do not stop the loop — a
+            # working source's events must be preferred over a broken source's [].
+            if not events:
+                health.last_empty = datetime.now(UTC)
+                empty_sources.append(name)
+                logger.warning(
+                    "calendar source returned empty (no error), continuing failover",
+                    source=name,
+                )
+                continue
+            # VERIFIED non-empty success.
             health.last_success = datetime.now(UTC)
             health.consecutive_failures = 0
             health.last_error = None
@@ -89,6 +110,23 @@ class CompositeCalendarProvider(CalendarProvider):
                     f"✅ Calendar fallback recovered: {' → '.join(failed_sources)} gagal → {name} OK"
                 )
             return events
+        # Every source either errored or returned empty.
+        if empty_sources:
+            # At least one source returned empty WITHOUT error: not all errored.
+            # Loud alert (possible schema drift OR a genuinely quiet window). Return
+            # [] WITHOUT recording a verified success, so the staleness gate stays
+            # fail-CLOSED rather than treating this as "fresh with zero events".
+            logger.warning(
+                "ALL calendar sources returned EMPTY",
+                empty_sources=empty_sources,
+                failed_sources=failed_sources,
+            )
+            await self._emit_alert(
+                "🚨 CALENDAR: SEMUA sumber EMPTY (schema drift? / quiet window) — "
+                f"empty={empty_sources} failed={failed_sources}"
+            )
+            return []
+        # Every source ERRORED (none returned even empty).
         await self._emit_alert("🚨 CALENDAR: SEMUA sumber gagal (total staleness)")
         raise ProviderError("all calendar sources unavailable")
 
@@ -96,8 +134,22 @@ class CompositeCalendarProvider(CalendarProvider):
         return dict(self._health)
 
     def freshest_last_success(self) -> datetime | None:
+        """Most recent VERIFIED (non-empty) success across sources.
+
+        ``last_success`` is only set on a non-empty fetch (defect B1), so this
+        reflects verified freshness. The staleness gate keys off this signal,
+        keeping it fail-CLOSED on all-empty cycles.
+        """
         times = [h.last_success for h in self._health.values() if h.last_success]
         return max(times) if times else None
+
+    def freshest_nonempty_success(self) -> datetime | None:
+        """Alias for :meth:`freshest_last_success` with an explicit name.
+
+        Both reflect the last VERIFIED non-empty fetch. Prefer this name in new
+        callers; an all-empty cycle never advances it.
+        """
+        return self.freshest_last_success()
 
     def active_tier(self) -> str | None:
         best: tuple[datetime, str] | None = None

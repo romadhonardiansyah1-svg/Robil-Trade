@@ -25,6 +25,9 @@ async def main() -> None:
     bot = TelegramDelivery(
         cfg.secrets.telegram_bot_token,
         cfg.secrets.telegram_chat_id,
+        database_url=cfg.secrets.database_url,
+        redis_url=cfg.secrets.redis_url,
+        litellm_url=cfg.secrets.litellm_base_url if cfg.settings.llm.enabled else "",
     )
     logger.info("starting Telegram bot polling")
     try:

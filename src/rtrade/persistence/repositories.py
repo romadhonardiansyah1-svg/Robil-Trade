@@ -257,6 +257,31 @@ class SignalRepo:
         result = await self._session.execute(stmt)
         return [float(r) for r in result.scalars().all() if r is not None]
 
+    async def resolved_outcomes_since(self, start: datetime) -> list[tuple[str, float | None]]:
+        """(status, outcome_r) for TP_HIT/SL_HIT resolved since `start` (E1 calibration).
+
+        Read-only aggregate feed for the /calibration command. outcome_r may be
+        None for a resolved row; callers treat win/loss from status and skip
+        None values when computing expectancy.
+        """
+        stmt = select(Signal.status, Signal.outcome_r).where(
+            Signal.status.in_(("TP_HIT", "SL_HIT")),
+            Signal.resolved_at.is_not(None),
+            Signal.resolved_at >= ensure_utc(start),
+        )
+        result = await self._session.execute(stmt)
+        return [(str(status), float(r) if r is not None else None) for status, r in result.all()]
+
+    async def status_counts_since(self, start: datetime) -> dict[str, int]:
+        """Count of signals grouped by status with bar_ts >= `start` (E1 abstain rate)."""
+        stmt = (
+            select(Signal.status, func.count())
+            .where(Signal.bar_ts >= ensure_utc(start))
+            .group_by(Signal.status)
+        )
+        result = await self._session.execute(stmt)
+        return {str(status): int(count) for status, count in result.all()}
+
     async def open_for_tracking(self) -> list[Signal]:
         stmt = (
             select(Signal)

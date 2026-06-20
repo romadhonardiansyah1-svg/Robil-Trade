@@ -13,7 +13,6 @@ Provider limits (per PLAN / ADR-03):
 from __future__ import annotations
 
 from dataclasses import dataclass
-import time
 
 import redis.asyncio as aioredis
 
@@ -45,13 +44,16 @@ BINANCE_PUBLIC_BUCKET = BucketConfig.per_minute("binance_public", 500)
 _LUA_ACQUIRE = """
 -- Token bucket acquire script (atomic).
 -- KEYS[1] = bucket key
--- ARGV[1] = max_tokens, ARGV[2] = refill_rate, ARGV[3] = now (float seconds)
+-- ARGV[1] = max_tokens, ARGV[2] = refill_rate
+-- `now` is taken from the Redis server clock (TIME) so the bucket is immune to
+-- client clock-skew across processes (P0 fix #4).
 -- Returns: 1 if acquired, 0 if rejected.
 
 local key = KEYS[1]
 local max_tokens = tonumber(ARGV[1])
 local refill_rate = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
+local t = redis.call('TIME')
+local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
 
 local data = redis.call('HMGET', key, 'tokens', 'last_refill')
 local tokens = tonumber(data[1]) or max_tokens
@@ -99,7 +101,7 @@ class RateLimiter:
         key = f"rtrade:ratelimit:{bucket.name}"
         result = await script(  # type: ignore[operator]
             keys=[key],
-            args=[bucket.max_tokens, bucket.refill_rate, time.time()],
+            args=[bucket.max_tokens, bucket.refill_rate],
         )
         if result == 0:
             raise RateLimitExceeded(
@@ -110,9 +112,13 @@ class RateLimiter:
     async def tokens_remaining(self, bucket: BucketConfig) -> float:
         """Check how many tokens are available (for diagnostics)."""
         key = f"rtrade:ratelimit:{bucket.name}"
+        # Use the Redis server clock (consistent with the acquire script, which
+        # derives `now` from TIME) instead of the client clock.
+        secs, micros = await self._redis.time()
+        now = float(secs) + float(micros) / 1_000_000
         data = await self._redis.hmget(key, "tokens", "last_refill")
         tokens = float(data[0]) if data[0] is not None else float(bucket.max_tokens)
-        last_refill = float(data[1]) if data[1] is not None else time.time()
-        elapsed = time.time() - last_refill
+        last_refill = float(data[1]) if data[1] is not None else now
+        elapsed = now - last_refill
         refill = elapsed * bucket.refill_rate
         return min(bucket.max_tokens, tokens + refill)

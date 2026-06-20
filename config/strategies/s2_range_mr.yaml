@@ -1,6 +1,10 @@
 # S2 Range Mean-Reversion Configuration
 # PLAN §8.4 — Aktif hanya saat regime RANGE (ADX < 20)
 
+# SP-4/C2: swing strategy — only runs on the 1h entry timeframe. Keeps S2 off
+# scalping timeframes (e.g. XAUUSD M5/M15, which are owned by S3/S4).
+entry_timeframes: ["1h"]
+
 range:
   adx_max: 20                    # Maximum ADX for range regime
   band_lookback: 100             # Bars to compute S/R band

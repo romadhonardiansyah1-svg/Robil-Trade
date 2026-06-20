@@ -161,11 +161,15 @@ async def _ingest_incremental(
     if latest is not None and now - ensure_utc(latest.ts) <= timeframe_duration(tf):
         return 0
     if latest is None:
-        since = now - timedelta(days=120)
-        # P1-7 (FR-DATA-09): cold start must backfill a full warmup window, not a
-        # token page. 5000 is the TwelveData per-request ceiling; steady-state
-        # incremental fetches below stay tiny (limit=10).
+        # P1-7 (FR-DATA-09): cold start backfills a full warmup window. 5000 is
+        # the per-request ceiling for both TwelveData and OANDA.
         limit = 5000
+        # OANDA's from+count returns `count` bars going FORWARD from `from`, so a
+        # fixed 120-day start would return only the OLDEST `limit` bars on M5/M15
+        # and never reach the present. Size the window so from+count lands at ~now.
+        # For TwelveData TFs (H1/H4/D1) this min() stays 120d, so its behaviour is
+        # unchanged.
+        since = now - min(timedelta(days=120), limit * timeframe_duration(tf))
     else:
         since = ensure_utc(latest.ts) - 2 * timeframe_duration(tf)
         limit = 10

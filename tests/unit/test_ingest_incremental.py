@@ -138,3 +138,48 @@ class TestIngestIncremental:
 
         assert count == 0
         assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_first_run_m5_window_lands_near_now() -> None:
+    """C2 regression: cold-start window for M5 must be sized to limit*tf so an
+    OANDA from+count fetch reaches ~now (not stuck 120 days in the past)."""
+    from rtrade.pipeline.scan import _ingest_incremental
+
+    provider = FakeProvider()
+    repo = FakeRepo(latest_candle=None)
+    now = datetime(2026, 6, 11, 10, 0, tzinfo=UTC)
+
+    await _ingest_incremental(
+        provider,
+        _make_instrument(),
+        1,
+        Timeframe.M5,
+        repo,
+        now,  # type: ignore[arg-type]
+    )
+
+    assert len(provider.calls) == 1
+    call = provider.calls[0]
+    assert call["limit"] == 5000
+    # 5000 * 5min = 25000 minutes ~= 17.36 days back, NOT 120 days.
+    expected_since = now - timedelta(minutes=5 * 5000)
+    assert abs(expected_since - call["since"]) < timedelta(minutes=1)
+    assert (now - call["since"]) < timedelta(days=20)
+
+
+@pytest.mark.asyncio
+async def test_first_run_h1_window_still_120_days() -> None:
+    """Preservation: H1 (TwelveData-served) cold start keeps the 120-day window
+    (5000*1h = 208d > 120d, so the min() clamps to 120d — unchanged)."""
+    from rtrade.pipeline.scan import _ingest_incremental
+
+    provider = FakeProvider()
+    repo = FakeRepo(latest_candle=None)
+    now = datetime(2026, 6, 11, 10, 0, tzinfo=UTC)
+
+    await _ingest_incremental(provider, _make_instrument(), 1, Timeframe.H1, repo, now)  # type: ignore[arg-type]
+
+    call = provider.calls[0]
+    assert call["limit"] == 5000
+    assert abs((now - timedelta(days=120)) - call["since"]) < timedelta(minutes=1)

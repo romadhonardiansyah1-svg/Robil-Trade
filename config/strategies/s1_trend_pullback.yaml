@@ -7,6 +7,9 @@
 strategy: s1_trend_pullback
 timeframe_signal: "1h"
 timeframe_confirm: "4h"
+# SP-4/C2: swing strategy — only runs on the 1h entry timeframe. Keeps S1 off
+# scalping timeframes (e.g. XAUUSD M5/M15, which are owned by S3/S4).
+entry_timeframes: ["1h"]
 
 trend:
   ema_fast: 21

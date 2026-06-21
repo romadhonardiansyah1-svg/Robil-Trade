@@ -76,7 +76,7 @@ def build_scan_pool(
     primary_flavor = model_flavor(resolve_role_model(cfg, "analyst"))
 
     # --- 1. API keys, family model analyst dulu, sisanya menyusul ---
-    families = ["gemini", "anthropic", "openai", "xai"]
+    families = ["gemini", "anthropic", "openai", "xai", "openrouter"]
     families.sort(key=lambda f: f != primary_flavor)
     for fam in families:
         for i, key in enumerate(cfg.secrets.keys_for(fam), start=1):

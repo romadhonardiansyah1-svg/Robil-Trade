@@ -338,6 +338,9 @@ class Secrets(BaseSettings):
     xai_api_key_1: str = ""
     xai_api_key_2: str = ""
     xai_api_key_3: str = ""
+    openrouter_api_key_1: str = ""
+    openrouter_api_key_2: str = ""
+    openrouter_api_key_3: str = ""
     litellm_master_key: str = ""
     litellm_base_url: str = "http://localhost:4000"
 
@@ -368,6 +371,9 @@ class Secrets(BaseSettings):
         "xai_api_key_1",
         "xai_api_key_2",
         "xai_api_key_3",
+        "openrouter_api_key_1",
+        "openrouter_api_key_2",
+        "openrouter_api_key_3",
     )
     @classmethod
     def _reject_consumer_oauth(cls, v: str) -> str:
@@ -382,7 +388,7 @@ class Secrets(BaseSettings):
     def keys_for(self, family: str) -> list[str]:
         """Daftar API key non-kosong untuk satu family provider, urut slot.
 
-        family: "gemini" | "anthropic" | "openai" | "xai"
+        family: "gemini" | "anthropic" | "openai" | "xai" | "openrouter"
         """
         slots: dict[str, list[str]] = {
             "gemini": [
@@ -403,6 +409,11 @@ class Secrets(BaseSettings):
                 self.openai_api_key_3,
             ],
             "xai": [self.xai_api_key_1, self.xai_api_key_2, self.xai_api_key_3],
+            "openrouter": [
+                self.openrouter_api_key_1,
+                self.openrouter_api_key_2,
+                self.openrouter_api_key_3,
+            ],
         }
         return [k for k in slots.get(family, []) if k]
 

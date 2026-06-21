@@ -58,10 +58,22 @@ class ContextPack:
         }
 
     def to_prompt_text(self) -> str:
-        """Convert to a readable text block for the LLM prompt."""
+        """Convert to a readable text block for the LLM prompt.
+
+        Trusted/numeric data is rendered as-is. Externally-sourced data
+        (calendar events) is fenced inside the `<DATA_TIDAK_TEPERCAYA>`
+        delimiter so the model treats that block as DATA, never instructions
+        (see analyst_system.md / critic_system.md).
+        """
         import json
 
-        return json.dumps(self.to_dict(), indent=2, default=str)
+        d = self.to_dict()
+        untrusted = {"calendar_next_72h": d.pop("calendar_next_72h")}
+        trusted_text = json.dumps(d, indent=2, default=str)
+        untrusted_text = json.dumps(untrusted, indent=2, default=str)
+        return (
+            f"{trusted_text}\n\n<DATA_TIDAK_TEPERCAYA>\n{untrusted_text}\n</DATA_TIDAK_TEPERCAYA>"
+        )
 
 
 def _make_source_id(
@@ -192,25 +204,40 @@ def build_context_pack(
     source_ids.append(regime["source_id"])
 
     # --- Calendar (next 72h) ---
+    # Calendar events are EXTERNALLY-SOURCED (untrusted). Every string value is
+    # sanitized -- not just the event name -- before it can reach the prompt.
     calendar_entries: list[dict[str, Any]] = []
     injection_detected = False
     for evt in calendar_events[:20]:  # limit
         from rtrade.llm.sanitize import contains_injection, sanitize_untrusted
 
-        raw_event_name = str(evt.get("event", "unknown"))
-        if contains_injection(raw_event_name):
-            injection_detected = True
-            logger.warning("prompt injection detected in calendar event", event=raw_event_name[:50])
-        sanitized_name = sanitize_untrusted(raw_event_name)
+        # Sanitize ALL untrusted string fields; keep non-string (numeric) values as-is.
+        sanitized_evt: dict[str, Any] = {}
+        for key, value in evt.items():
+            if isinstance(value, str):
+                if contains_injection(value):
+                    injection_detected = True
+                    logger.warning(
+                        "prompt injection detected in calendar event",
+                        field=key,
+                        value=value[:50],
+                    )
+                sanitized_evt[key] = sanitize_untrusted(value)
+            else:
+                sanitized_evt[key] = value
+
+        sanitized_name = sanitize_untrusted(str(evt.get("event", "unknown")))
         sid = _make_source_id(
             "cal",
             sanitized_name,
-            evt.get("currency", "UNK"),
+            sanitized_evt.get("currency", "UNK"),
             tf_str,
-            evt.get("event_time", bar_ts),
+            sanitized_evt.get("event_time", bar_ts),
         )
         source_ids.append(sid)
-        calendar_entries.append({**evt, "event": sanitized_name, "source_id": sid})
+        sanitized_evt["event"] = sanitized_name
+        sanitized_evt["source_id"] = sid
+        calendar_entries.append(sanitized_evt)
 
     # --- Derivatives (crypto only) ---
     deriv_data: dict[str, Any] | None = None

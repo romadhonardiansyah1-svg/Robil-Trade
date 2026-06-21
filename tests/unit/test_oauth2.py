@@ -232,3 +232,35 @@ class TestTokenExchangeNoLeak:
         blob = repr(logs)
         assert ACCESS_SENTINEL not in blob
         assert REFRESH_SENTINEL not in blob
+
+
+# C7: device-code poll loop must be bounded by expires_in + a max-iteration cap.
+class TestDeviceLoginBounded:
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_device_login_times_out_when_never_authorized(self) -> None:
+        """RFC 8628 poll that never returns a token must raise a timeout RuntimeError,
+        not loop forever."""
+        respx.post(DEVICE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "device_code": "dev-code-123",
+                    "user_code": "WXYZ",
+                    "verification_uri": "https://example.com/device",
+                    "interval": 0,
+                    "expires_in": 1,
+                },
+            )
+        )
+        poll_route = respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"error": "authorization_pending"})
+        )
+
+        prov = _make_provider(grant_type="device_code")
+        with pytest.raises(RuntimeError, match=r"(?i)timeout|expired|max"):
+            await prov.device_login()
+
+        # Must have polled a bounded number of times — proof it did not hang forever.
+        assert poll_route.call_count >= 1
+        assert poll_route.call_count < 100_000

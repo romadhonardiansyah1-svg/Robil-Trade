@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from base64 import urlsafe_b64encode
 from dataclasses import dataclass, field
+from datetime import timedelta
 from hashlib import sha256
 import secrets
 import time
@@ -22,12 +23,14 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import structlog
 
+from rtrade.core.timeutil import utcnow
 from rtrade.llm.auth.base import AuthMaterial, CredentialProvider
 from rtrade.llm.auth.token_store import StoredToken, load_token, save_token
 
 logger = structlog.get_logger(__name__)
 
 _REFRESH_SKEW = 120.0  # refresh 2 menit sebelum expiry
+_DEVICE_POLL_MAX_ITERATIONS = 1000  # safety cap, independent of the time deadline
 
 
 @dataclass
@@ -160,7 +163,25 @@ class OAuth2Provider(CredentialProvider):
 
             is_codex = "device_auth_id" in d
 
+            # C7: bound the poll loop. RFC 8628 device codes expire; never spin
+            # forever. Deadline is driven by the device-init `expires_in` (tz-aware
+            # UTC), with a hard max-iteration cap as a second safety net.
+            expires_in = float(d.get("expires_in", 900))
+            deadline = utcnow() + timedelta(seconds=expires_in)
+            iterations = 0
+
             while True:
+                if utcnow() >= deadline:
+                    raise RuntimeError(
+                        f"{self.provider_id}: device-code login timeout "
+                        f"(expires_in={expires_in:.0f}s terlampaui tanpa otorisasi)."
+                    )
+                iterations += 1
+                if iterations > _DEVICE_POLL_MAX_ITERATIONS:
+                    raise RuntimeError(
+                        f"{self.provider_id}: device-code login melebihi batas "
+                        f"{_DEVICE_POLL_MAX_ITERATIONS} iterasi poll (timeout)."
+                    )
                 await asyncio.sleep(interval)
 
                 if is_codex:

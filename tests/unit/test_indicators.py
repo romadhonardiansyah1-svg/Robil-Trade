@@ -112,6 +112,87 @@ class TestIndicatorEngine:
             compute(df)
 
 
+class TestComputePurity:
+    """F2: compute() must not mutate the caller's DataFrame."""
+
+    def test_compute_does_not_mutate_input(self) -> None:
+        df = _make_ohlcv_df(50)
+        original_cols = list(df.columns)
+        original_dtypes = df.dtypes.to_dict()
+        original_index = df.index.copy()
+        # Snapshot the raw values so we can detect in-place dtype coercion.
+        original_values = df.copy(deep=True)
+
+        result = compute(df)
+
+        # The original frame must be untouched: same columns, no indicator
+        # columns leaked back, identical dtypes, identical values.
+        assert list(df.columns) == original_cols, "compute() added columns to input"
+        assert df.dtypes.to_dict() == original_dtypes, "compute() coerced input dtypes"
+        assert df.index.equals(original_index), "compute() altered the input index"
+        pd.testing.assert_frame_equal(df, original_values)
+
+        # And the returned frame is a distinct object that DID get indicators.
+        assert result is not df
+        assert "vwap" in result.columns
+
+
+def _make_two_day_intraday_df() -> pd.DataFrame:
+    """Two UTC calendar days of hourly bars with non-trivial volume.
+
+    Constant per-bar values are avoided so the no-reset cumulative VWAP
+    genuinely differs from the daily-anchored one.
+    """
+    # 6 bars on day 1, 6 bars on day 2.
+    day1 = pd.date_range(start=datetime(2026, 3, 1, 18, tzinfo=UTC), periods=6, freq="1h")
+    day2 = pd.date_range(start=datetime(2026, 3, 2, 0, tzinfo=UTC), periods=6, freq="1h")
+    index = day1.append(day2)
+
+    close = np.array([100.0, 110, 120, 130, 140, 150, 200, 210, 220, 230, 240, 250])
+    high = close + 2.0
+    low = close - 2.0
+    open_ = close - 1.0
+    volume = np.array([10.0, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120])
+
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+        index=index,
+    )
+
+
+class TestVwapDailyAnchor:
+    """F1: VWAP must reset accumulation at the first bar of each UTC day."""
+
+    def test_vwap_resets_on_first_bar_of_new_utc_day(self) -> None:
+        df = _make_two_day_intraday_df()
+        result = compute(df)
+
+        # First bar of day 2 (index 6): with a daily reset, the cumulative
+        # VWAP equals that single bar's typical price.
+        day2_open = result.index[6]
+        assert day2_open.date() == datetime(2026, 3, 2, tzinfo=UTC).date()
+        typical = (result["high"].iloc[6] + result["low"].iloc[6] + result["close"].iloc[6]) / 3
+        assert result["vwap"].iloc[6] == pytest.approx(typical, rel=1e-9)
+
+    def test_vwap_differs_from_non_reset_cumulative(self) -> None:
+        df = _make_two_day_intraday_df()
+        result = compute(df)
+
+        # Whole-frame (no reset) cumulative VWAP at the last bar.
+        typical = (df["high"] + df["low"] + df["close"]) / 3
+        no_reset = (typical * df["volume"]).cumsum() / df["volume"].cumsum()
+
+        # The daily-anchored value at the last bar must differ because day-2
+        # accumulation excludes day-1 bars.
+        assert result["vwap"].iloc[-1] != pytest.approx(no_reset.iloc[-1], rel=1e-9)
+
+        # Sanity: day-2 anchored VWAP equals the day-2-only cumulative.
+        day2 = df.iloc[6:]
+        typ2 = (day2["high"] + day2["low"] + day2["close"]) / 3
+        expected = (typ2 * day2["volume"]).cumsum() / day2["volume"].cumsum()
+        assert result["vwap"].iloc[-1] == pytest.approx(expected.iloc[-1], rel=1e-9)
+
+
 class TestStructure:
     """Tests for market structure analysis."""
 

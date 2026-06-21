@@ -70,6 +70,10 @@ def compute(
         "missing OHLC columns"
     )
 
+    # F2: operate on a copy so dtype coercion and column assignments below never
+    # touch the caller's frame. The engine contract is pure / no side effects.
+    df = df.copy(deep=True)
+
     # Ensure float dtype for calculations.
     for col in ("open", "high", "low", "close"):
         df[col] = df[col].astype(float)
@@ -114,11 +118,21 @@ def compute(
             df["bb_mid"] = bb_df[bbm[0]]
             df["bb_lower"] = bb_df[bbl[0]]
 
-    # --- VWAP (rolling daily — only if volume available) ---
+    # --- VWAP (rolling daily, anchored to the UTC calendar day) ---
+    # The accumulation resets at the first bar of each UTC day, so VWAP is a
+    # true intraday mean rather than a whole-frame cumulative. Zero-volume bars
+    # within a day contribute 0 to both numerator and denominator; a fully
+    # zero-volume day yields NaN (no div-by-zero, no misleading carry-forward).
     if "volume" in df.columns and df["volume"].sum() > 0:
         typical_price = (df["high"] + df["low"] + df["close"]) / 3
-        cumvol = df["volume"].cumsum()
-        cumtp = (typical_price * df["volume"]).cumsum()
+        index = df.index
+        assert isinstance(index, pd.DatetimeIndex), "VWAP requires a DatetimeIndex"
+        # Anchor to the UTC calendar day. tz-aware indexes are converted to UTC;
+        # tz-naive indexes are treated as already-UTC (per the engine contract).
+        utc_index = index.tz_convert("UTC") if index.tz is not None else index
+        utc_day = utc_index.normalize()
+        cumvol = df["volume"].groupby(utc_day, sort=False).cumsum()
+        cumtp = (typical_price * df["volume"]).groupby(utc_day, sort=False).cumsum()
         df["vwap"] = cumtp / cumvol.replace(0, np.nan)
     else:
         df["vwap"] = np.nan

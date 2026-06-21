@@ -134,3 +134,54 @@ class TestAuditRepoSerialization:
         # Caller's dict must be left untouched (no injected _chain key).
         assert caller_detail == {"x": 1}
         assert "_chain" not in caller_detail
+
+
+class TestVerifyChainAnchor:
+    """D3: a 'recent rows' window does not start at genesis. verify_chain must
+    support anchoring on the first window entry's own prev_hash so the latest
+    rows can be integrity-checked without false-alarming on the window edge.
+    """
+
+    @staticmethod
+    def _build(n: int) -> list[dict]:
+        entries: list[dict] = []
+        prev_hash = "genesis"
+        for i in range(n):
+            detail: dict = {"info": f"row_{i}"}
+            chain = build_chain_entry(prev_hash, f"stage_{i}", True, f"sig_{i}", detail)
+            detail["_chain"] = chain
+            entries.append(
+                {"stage": f"stage_{i}", "ok": True, "signal_id": f"sig_{i}", "detail": detail}
+            )
+            prev_hash = chain["row_hash"]
+        return entries
+
+    def test_window_not_starting_at_genesis_fails_without_anchor(self) -> None:
+        """Default behavior (genesis anchor) rejects a mid-chain window."""
+        window = self._build(5)[2:]
+        ok, idx = verify_chain(window)
+        assert ok is False
+        assert idx == 0  # first window row's prev_hash != "genesis"
+
+    def test_window_not_starting_at_genesis_ok_with_anchor(self) -> None:
+        """anchor_first=True accepts a valid mid-chain window."""
+        window = self._build(5)[2:]
+        ok, count = verify_chain(window, anchor_first=True)
+        assert ok is True
+        assert count == len(window)
+
+    def test_anchor_first_still_detects_tamper_in_window(self) -> None:
+        """Anchoring the edge must NOT weaken detection of inner tampering."""
+        window = self._build(5)[2:]
+        window[1]["detail"]["info"] = "TAMPERED"
+        ok, idx = verify_chain(window, anchor_first=True)
+        assert ok is False
+        assert idx == 1
+
+    def test_anchor_first_detects_tamper_in_first_window_row(self) -> None:
+        """Even the anchored first row's own content is still hash-verified."""
+        window = self._build(5)[2:]
+        window[0]["stage"] = "TAMPERED"
+        ok, idx = verify_chain(window, anchor_first=True)
+        assert ok is False
+        assert idx == 0

@@ -270,27 +270,8 @@ clone_repo() {
 }
 
 # ============================================================================
-# STEP 5: COLLECT CREDENTIALS — menu provider (C2)
+# STEP 5: COLLECT CREDENTIALS — secrets + data providers + Telegram (LLM via wizard)
 # ============================================================================
-
-# Kumpulkan sampai MAX key untuk satu provider ke array global bernama $2.
-collect_keys() {
-    local label="$1" max="$3"
-    local -n arr_ref="$2"
-    arr_ref=()
-    echo -e "${BOLD}${label} — masukkan sampai ${max} key (Enter kosong = selesai)${NC}"
-    local i key
-    for (( i=1; i<=max; i++ )); do
-        read -rp "$(echo -e "${CYAN}  Key #${i}:${NC} ")" key
-        [[ -z "$key" ]] && break
-        if [[ "$key" == sk-ant-oat* ]]; then
-            error "Token konsumen (sk-ant-oat...) DILARANG sebagai API key — pakai API key resmi."
-            (( i-- )); continue
-        fi
-        arr_ref+=("$key")
-    done
-    success "${label}: ${#arr_ref[@]} key tersimpan"
-}
 
 collect_credentials() {
     step "5/9 — Credentials & Configuration"
@@ -307,42 +288,23 @@ PYEOF
     info "Secrets auto-generated ✓ (termasuk RTRADE_TOKEN_KEY untuk token OAuth)"
 
     local TWELVEDATA_KEY="" FINNHUB_KEY="" DOMAIN=""
+    local OANDA_TOKEN="" OANDA_ACCOUNT="" OANDA_ENVIRONMENT=""
     TELEGRAM_TOKEN=""; TELEGRAM_CHAT=""   # global: dipakai step 6 & 8
     echo ""
-    read -rp "$(echo -e "${CYAN}TwelveData API Key:${NC} ")" TWELVEDATA_KEY
+    echo -e "${BOLD}--- Data pasar (minimal satu provider) ---${NC}"
+    echo -e "${CYAN}OANDA (FX/metals — disarankan). Buat akun practice di oanda.com → Manage API Access.${NC}"
+    read -rp "$(echo -e "${CYAN}OANDA API Token (opsional):${NC} ")" OANDA_TOKEN
+    read -rp "$(echo -e "${CYAN}OANDA Account ID (opsional):${NC} ")" OANDA_ACCOUNT
+    read -rp "$(echo -e "${CYAN}OANDA env [practice/live, default practice]:${NC} ")" OANDA_ENVIRONMENT
+    OANDA_ENVIRONMENT="${OANDA_ENVIRONMENT:-practice}"
+    read -rp "$(echo -e "${CYAN}TwelveData API Key (opsional):${NC} ")" TWELVEDATA_KEY
     read -rp "$(echo -e "${CYAN}Finnhub API Key (opsional):${NC} ")" FINNHUB_KEY
 
-    GEMINI_KEYS=(); ANTHROPIC_KEYS=(); OPENAI_KEYS=(); XAI_KEYS=()
-    WANT_VERTEX=0; WANT_AZURE=0; WANT_GATEWAY=0
-    while true; do
-        echo ""; divider
-        echo -e "${BOLD}Pilih provider LLM (boleh banyak, fallback otomatis):${NC}"
-        echo "  1) Gemini        — API key (aistudio.google.com)   [${#GEMINI_KEYS[@]} key]"
-        echo "  2) Anthropic     — API key (console.anthropic.com) [${#ANTHROPIC_KEYS[@]} key]"
-        echo "  3) OpenAI        — API key (platform.openai.com)   [${#OPENAI_KEYS[@]} key]"
-        echo "  4) xAI Grok      — API key (console.x.ai)          [${#XAI_KEYS[@]} key]"
-        echo "  5) Google Vertex — OAuth login (multi-akun)        [$( ((WANT_VERTEX)) && echo dipilih || echo - )]"
-        echo "  6) Azure OpenAI  — OAuth/AD                        [$( ((WANT_AZURE)) && echo dipilih || echo - )]"
-        echo "  7) OAuth gateway — enterprise/self-hosted          [$( ((WANT_GATEWAY)) && echo dipilih || echo - )]"
-        echo "  0) Selesai"
-        read -rp "$(echo -e "${YELLOW}Pilihan [0-7]:${NC} ")" choice
-        case "$choice" in
-            1) collect_keys "Gemini" GEMINI_KEYS 5 ;;
-            2) collect_keys "Anthropic" ANTHROPIC_KEYS 3 ;;
-            3) collect_keys "OpenAI" OPENAI_KEYS 3 ;;
-            4) collect_keys "xAI" XAI_KEYS 3 ;;
-            5) WANT_VERTEX=1; success "Vertex dipilih — login OAuth dilakukan SETELAH install" ;;
-            6) WANT_AZURE=1; success "Azure dipilih — isi AZURE_* env setelah install" ;;
-            7) WANT_GATEWAY=1; success "Gateway dipilih — isi RTRADE_OAUTH_* env setelah install" ;;
-            0) break ;;
-            *) warn "Pilihan tidak dikenal" ;;
-        esac
-    done
-
-    local total_keys=$(( ${#GEMINI_KEYS[@]} + ${#ANTHROPIC_KEYS[@]} + ${#OPENAI_KEYS[@]} + ${#XAI_KEYS[@]} ))
-    if [[ $total_keys -eq 0 && $WANT_VERTEX -eq 0 && $WANT_AZURE -eq 0 && $WANT_GATEWAY -eq 0 ]]; then
-        warn "Belum ada kredensial LLM — bot jalan TANPA LLM sampai .env diisi."
-    fi
+    # NOTE: Kredensial LLM (Gemini/OpenAI/xAI/OpenRouter/Codex/Vertex, API key & OAuth)
+    # TIDAK lagi dikumpulkan di sini. Setelah container app sehat, STEP "Model Wizard"
+    # menjalankan `rtrade setup wizard` — pilih banyak provider × model, API key atau
+    # OAuth (device-code Codex / PKCE xAI), multi-akun, dengan fallback otomatis.
+    info "Kredensial LLM diatur lewat Model Wizard setelah install (multi-provider, OAuth/API key)."
 
     echo ""; echo -e "${BOLD}--- Telegram ---${NC}"
     read -rp "$(echo -e "${CYAN}Telegram Bot Token:${NC} ")" TELEGRAM_TOKEN
@@ -359,13 +321,13 @@ PYEOF
         echo ""
         echo "TWELVEDATA_API_KEY=${TWELVEDATA_KEY}"
         echo "FINNHUB_API_KEY=${FINNHUB_KEY}"
+        echo "OANDA_ENV=${OANDA_ENVIRONMENT}"
+        echo "OANDA_TOKEN_1=${OANDA_TOKEN}"
+        echo "OANDA_ACCOUNT_1=${OANDA_ACCOUNT}"
         echo ""
-        echo "# === LLM (multi-key = fallback otomatis) ==="
-        local i
-        for i in "${!GEMINI_KEYS[@]}";    do echo "GEMINI_API_KEY_$((i+1))=${GEMINI_KEYS[$i]}"; done
-        for i in "${!ANTHROPIC_KEYS[@]}"; do echo "ANTHROPIC_API_KEY_$((i+1))=${ANTHROPIC_KEYS[$i]}"; done
-        for i in "${!OPENAI_KEYS[@]}";    do echo "OPENAI_API_KEY_$((i+1))=${OPENAI_KEYS[$i]}"; done
-        for i in "${!XAI_KEYS[@]}";       do echo "XAI_API_KEY_$((i+1))=${XAI_KEYS[$i]}"; done
+        echo "# === LLM ==="
+        echo "# Diisi oleh Model Wizard: 'rtrade setup wizard' (multi-provider, API key/OAuth)."
+        echo "# Multi-key = fallback otomatis; limit langganan ~5 jam → rotasi akun (llm.pool)."
         echo ""
         echo "# === OAuth token store (WAJIB di prod — token disimpan terenkripsi) ==="
         echo "RTRADE_TOKEN_KEY=${TOKEN_KEY}"
@@ -479,6 +441,57 @@ run_migrations() {
 }
 
 # ============================================================================
+# STEP 7b: MODEL WIZARD (LLM providers/models — API key & OAuth, multi-akun)
+# ============================================================================
+run_model_wizard() {
+    step "7b — Model Wizard (LLM: provider × model, API key / OAuth)"
+
+    cd "$INSTALL_DIR"
+    local CEX_I="docker compose -f docker-compose.yml -f docker-compose.prod.yml exec app"
+
+    echo -e "${BOLD}Pilih provider & model AI yang dipakai bot.${NC}"
+    echo "  • API key  : Gemini / Anthropic / OpenAI / xAI / OpenRouter (1 key → 300+ model)"
+    echo "  • OAuth     : Codex (device-code), xAI Grok (PKCE), Google Vertex"
+    echo -e "${YELLOW}  OAuth di VPS headless: pakai mode tempel (manual-paste). Untuk xAI PKCE yang${NC}"
+    echo -e "${YELLOW}  butuh loopback 127.0.0.1:56121, jalankan dari laptop: ssh -N -L 56121:127.0.0.1:56121 user@vps${NC}"
+    echo ""
+
+    if confirm "Jalankan Model Wizard sekarang?"; then
+        # Interactive (perlu TTY) — wizard menulis .env + config/settings.yaml.
+        sudo -u "$APP_USER" $CEX_I python -m rtrade.cli.setup wizard \
+            --env-file /app/.env --settings /app/config/settings.yaml || {
+            warn "Wizard dibatalkan/gagal — Anda bisa ulang: make wizard (atau exec app python -m rtrade.cli.setup wizard)"
+        }
+        # Verifikasi pool kredensial.
+        sudo -u "$APP_USER" $CEX_I python -m rtrade.cli.setup verify \
+            --settings /app/config/settings.yaml || \
+            warn "Pool kredensial masih kosong — bot jalan tanpa LLM sampai wizard diisi."
+    else
+        warn "Wizard dilewati — jalankan nanti: rtrade setup wizard (lihat docs/AUTH_OAUTH.md)."
+    fi
+}
+
+# ============================================================================
+# STEP 7c: BACKFILL DATA HISTORIS (otomatis, fail-soft, data-driven)
+# ============================================================================
+run_backfill() {
+    step "7c — Backfill data historis (semua instrumen × timeframe)"
+
+    if [[ "${SKIP_BACKFILL:-0}" == "1" ]]; then
+        warn "Backfill dilewati (--skip-backfill)."
+        return 0
+    fi
+
+    cd "$INSTALL_DIR"
+    local CEX="docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T app"
+
+    info "Backfill berjalan otomatis (fail-soft: simbol gagal dilewati, lanjut)..."
+    sudo -u "$APP_USER" $CEX python -m rtrade.cli.backfill --all --days "${BACKFILL_DAYS:-1095}" || \
+        warn "Sebagian backfill gagal — bot tetap start; ulangi nanti: rtrade backfill --all"
+    success "Backfill selesai (lihat log untuk detail per simbol)."
+}
+
+# ============================================================================
 # STEP 8: SETUP LOG ROTATION
 # ============================================================================
 setup_logrotate() {
@@ -584,29 +597,21 @@ verify_and_summary() {
     echo -e "${CYAN}║${NC}  2. Send /health to Telegram bot                             ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  3. Monitor logs: make prod-logs                              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  4. Start 4-8 week paper calibration (P4-T6)                 ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  5. Backfill data : ./scripts/backfill_all.sh                 ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}  6. Validasi      : docker compose ... exec app               ${CYAN}║${NC}"
-    echo -e "${CYAN}║${NC}     python scripts/run_backtest.py ... --walkforward           ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  5. LLM model/provider : rtrade setup wizard (jika dilewati)  ${CYAN}║${NC}"
+    echo -e "${CYAN}║${NC}  6. Backfill ulang (opsional) : rtrade backfill --all         ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}                                                              ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  ${RED}⚠️  DISCLAIMER: Sinyal analisis BUKAN nasihat keuangan.${NC}    ${CYAN}║${NC}"
     echo -e "${CYAN}║${NC}  ${RED}Selalu gunakan manajemen risiko yang ketat.${NC}               ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
 
-    if [[ ${WANT_VERTEX:-0} -eq 1 || ${WANT_AZURE:-0} -eq 1 || ${WANT_GATEWAY:-0} -eq 1 ]]; then
-        local CEX="docker compose -f docker-compose.yml -f docker-compose.prod.yml exec app"
-        echo ""; echo -e "${BOLD}${YELLOW}── Langkah OAuth (provider yang dipilih) ──${NC}"
-        [[ ${WANT_VERTEX:-0} -eq 1 ]] && {
-            echo "  Vertex (multi-akun): isi GOOGLE_OAUTH_CLIENT_SECRETS di .env, lalu:"
-            echo "    $CEX python -m rtrade.cli.auth login --provider google --account utama --flow paste_url"
-            echo "    set llm.vertex_project di config/settings.yaml"
-        }
-        [[ ${WANT_AZURE:-0} -eq 1 ]] && echo "  Azure: isi AZURE_TENANT_ID/CLIENT_ID/CLIENT_SECRET/OPENAI_ENDPOINT di .env"
-        [[ ${WANT_GATEWAY:-0} -eq 1 ]] && {
-            echo "  Gateway: isi RTRADE_OAUTH_TOKEN_URL/CLIENT_ID/SCOPES/DEVICE_URL di .env, lalu:"
-            echo "    $CEX python -m rtrade.cli.auth login --provider generic_gateway --account utama"
-        }
-        echo "  Cek: $CEX python -m rtrade.cli.auth status   |   $CEX python -m rtrade.cli.auth pool"
-    fi
+    local CEX="docker compose -f docker-compose.yml -f docker-compose.prod.yml exec app"
+    echo ""; echo -e "${BOLD}${YELLOW}── LLM / Model (atur kapan saja) ──${NC}"
+    echo "  Tambah/ubah provider & model : $CEX python -m rtrade.cli.setup wizard"
+    echo "  Cek pool kredensial          : $CEX python -m rtrade.cli.setup verify"
+    echo "  Status OAuth                 : $CEX python -m rtrade.cli.auth status"
+    echo -e "${YELLOW}  xAI Grok (PKCE) di VPS: dari laptop jalankan${NC}"
+    echo "    ssh -N -L 56121:127.0.0.1:56121 user@vps   lalu pilih xAI di wizard (mode tempel)."
+    echo "  Set RTRADE_XAI_CLIENT_ID di .env sebelum login xAI OAuth."
     echo ""
 }
 
@@ -616,6 +621,15 @@ verify_and_summary() {
 main() {
     banner
     check_root
+
+    # Optional flags: --skip-backfill, --backfill-days N
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --skip-backfill) SKIP_BACKFILL=1; shift ;;
+            --backfill-days) BACKFILL_DAYS="${2:-1095}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
     
     echo -e "${BOLD}Script ini akan menginstall dan mengkonfigurasi Robil Trade${NC}"
     echo -e "${BOLD}secara otomatis di VPS ini.${NC}"
@@ -636,6 +650,8 @@ main() {
     collect_credentials   # Step 5
     build_and_start       # Step 6
     run_migrations        # Step 7
+    run_model_wizard      # Step 7b — LLM providers/models (API key & OAuth)
+    run_backfill          # Step 7c — historical data (auto, fail-soft)
     setup_logrotate       # Step 8
     verify_and_summary    # Step 9
     

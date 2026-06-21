@@ -1062,6 +1062,15 @@ async def _run_strategies(
             start=day_start,
             end=day_start + timedelta(days=1),
         )
+        # B6: declare which safety gates MUST be evaluated so a dropped input
+        # fails CLOSED instead of being silently skipped. The deterministic path
+        # ALWAYS supplies freshness (candidate.bar_ts), regime (regime.regime)
+        # and expectancy (paper_outcomes is always a list[float]) inputs.
+        required_gates = {"GR-06", "GR-08", "GR-13"}
+        # GR-07 (news blackout) only applies to non-crypto instruments — crypto
+        # has no economic-calendar coverage, so requiring it would be incorrect.
+        if instrument.market != Market.CRYPTO:
+            required_gates.add("GR-07")
         gate = run_gate(
             candidate,
             latest_candle_ts=candidate.bar_ts,
@@ -1082,6 +1091,7 @@ async def _run_strategies(
             max_signals_per_day=profile.max_signals_per_day_per_instrument,
             paper_outcomes=paper_outcomes,
             expectancy_window=cfg.settings.risk.expectancy_guard_window,
+            require=required_gates,  # B6: fail CLOSED on missing required inputs
         )
 
         # F2: Audit gate.
@@ -1266,6 +1276,10 @@ async def _run_strategies(
                 original_candidate=candidate,
                 sources=pres.sources or ["deterministic_pipeline"],
                 pack_source_ids=set(pack.source_ids) if pack is not None else set(),
+                # B6: the LLM pipeline ran, so confidence + sources ARE supplied
+                # here — add the LLM gates to the always-required safety set so
+                # dropping either input fails CLOSED on the publish path.
+                require=required_gates | {"GR-09", "GR-11"},
             )
             await audit_repo.add(
                 stage=AuditStage.GATE.value,

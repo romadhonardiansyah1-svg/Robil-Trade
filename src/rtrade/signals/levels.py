@@ -10,7 +10,7 @@ Ensures all price levels satisfy the invariants:
 
 from __future__ import annotations
 
-import math
+from decimal import Decimal
 
 from rtrade.core.constants import Action
 from rtrade.signals.schemas import LevelSet
@@ -24,10 +24,16 @@ def round_to_tick(price: float, pip_size: float) -> float:
 
 
 def _decimals(pip_size: float) -> int:
-    """Number of decimal places for a pip size."""
-    if pip_size >= 1:
+    """Number of decimal places implied by a tick size.
+
+    Derived from the tick's own decimal representation so that non-decade
+    ticks (e.g. 0.25, 0.5) keep their full precision. Using log10 here would
+    under-report decimals for ticks like 0.25 and knock prices off the grid.
+    """
+    exponent = Decimal(str(pip_size)).normalize().as_tuple().exponent
+    if not isinstance(exponent, int):  # pragma: no cover - non-finite tick
         return 0
-    return max(0, -math.floor(math.log10(pip_size)))
+    return max(0, -exponent)
 
 
 def validate_and_round_levels(

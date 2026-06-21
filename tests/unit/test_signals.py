@@ -107,6 +107,27 @@ class TestRoundToTick:
     def test_integer_pip(self) -> None:
         assert round_to_tick(105.7, 1.0) == 106.0
 
+    def test_quarter_tick_lands_on_grid(self) -> None:
+        # F3: non-decade tick 0.25 must land exactly on the 0.25 grid.
+        assert round_to_tick(100.26, 0.25) == pytest.approx(100.25, abs=1e-9)
+        assert round_to_tick(100.30, 0.25) == pytest.approx(100.25, abs=1e-9)
+        assert round_to_tick(100.40, 0.25) == pytest.approx(100.50, abs=1e-9)
+
+    def test_half_tick_lands_on_grid(self) -> None:
+        # F3: tick 0.5 grid.
+        assert round_to_tick(100.24, 0.5) == pytest.approx(100.0, abs=1e-9)
+        assert round_to_tick(100.30, 0.5) == pytest.approx(100.5, abs=1e-9)
+
+    def test_integer_five_tick_lands_on_grid(self) -> None:
+        # F3: tick 5 grid.
+        assert round_to_tick(103.0, 5.0) == pytest.approx(105.0, abs=1e-9)
+        assert round_to_tick(101.0, 5.0) == pytest.approx(100.0, abs=1e-9)
+
+    def test_power_of_ten_ticks_preserved(self) -> None:
+        # F3: power-of-ten ticks must keep working.
+        assert round_to_tick(1.23456, 0.0001) == pytest.approx(1.2346, abs=1e-9)
+        assert round_to_tick(2705.123, 0.01) == pytest.approx(2705.12, abs=1e-9)
+
 
 class TestValidateAndRoundLevels:
     def test_valid_buy(self) -> None:

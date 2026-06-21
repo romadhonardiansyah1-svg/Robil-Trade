@@ -234,3 +234,135 @@ class TestStructure:
         gaps = detect_gaps(df, atr)
         # Gaps may or may not exist in random data, but function should not crash.
         assert isinstance(gaps, list)
+
+    # ------------------------------------------------------------------
+    # F6: S/R clustering must use single-linkage on consecutive gaps,
+    # not a drifting running mean (deterministic, order-independent).
+    # ------------------------------------------------------------------
+
+    def test_sr_clustering_single_linkage_chain(self) -> None:
+        """A price-chain with every consecutive gap <= tolerance is ONE cluster.
+
+        With atr=4.0 and mult 0.25 the tolerance is 1.0. Points spaced 0.9
+        apart chain into a single cluster under single-linkage. The old
+        drifting-mean method split this same chain into several clusters
+        because the lagging mean exceeded tolerance partway through.
+        """
+        from rtrade.indicators.structure import SwingPoint, cluster_sr_levels
+
+        ts = pd.Timestamp("2026-01-01", tz="UTC")
+        prices = [100.0, 100.9, 101.8, 102.7, 103.6]
+        points = [SwingPoint(index=i, price=p, is_high=True, ts=ts) for i, p in enumerate(prices)]
+        levels = cluster_sr_levels(points, atr=4.0, min_touches=1)
+
+        assert len(levels) == 1
+        assert levels[0].strength == 5
+        assert levels[0].price == pytest.approx(101.8)
+
+    def test_sr_clustering_order_independent(self) -> None:
+        """Shuffling the input yields identical levels (order-independent)."""
+        import random
+
+        from rtrade.indicators.structure import SwingPoint, cluster_sr_levels
+
+        ts = pd.Timestamp("2026-01-01", tz="UTC")
+        prices = [100.0, 100.4, 100.7, 105.0, 105.3, 110.0, 110.2, 110.5]
+        points = [
+            SwingPoint(index=i, price=p, is_high=(i % 2 == 0), ts=ts) for i, p in enumerate(prices)
+        ]
+        baseline = cluster_sr_levels(points, atr=4.0, min_touches=2)
+
+        shuffled = points[:]
+        random.Random(123).shuffle(shuffled)
+        result = cluster_sr_levels(shuffled, atr=4.0, min_touches=2)
+
+        assert [(lvl.price, lvl.strength, lvl.is_resistance) for lvl in baseline] == [
+            (lvl.price, lvl.strength, lvl.is_resistance) for lvl in result
+        ]
+
+    def test_sr_clustering_split_on_gap(self) -> None:
+        """A consecutive gap > tolerance starts a new cluster."""
+        from rtrade.indicators.structure import SwingPoint, cluster_sr_levels
+
+        ts = pd.Timestamp("2026-01-01", tz="UTC")
+        # tolerance = 0.25 * 4.0 = 1.0; the 105 group is > 1.0 from the 100 group.
+        prices = [100.0, 100.5, 105.0, 105.4]
+        points = [SwingPoint(index=i, price=p, is_high=True, ts=ts) for i, p in enumerate(prices)]
+        levels = cluster_sr_levels(points, atr=4.0, min_touches=2)
+
+        assert len(levels) == 2
+        assert levels[0].price == pytest.approx(100.25)
+        assert levels[1].price == pytest.approx(105.2)
+
+    def test_sr_clustering_tie_break_is_resistance(self) -> None:
+        """Equal-high/low count ties resolve deterministically to resistance."""
+        from rtrade.indicators.structure import SwingPoint, cluster_sr_levels
+
+        ts = pd.Timestamp("2026-01-01", tz="UTC")
+        points = [
+            SwingPoint(index=0, price=100.0, is_high=True, ts=ts),
+            SwingPoint(index=1, price=100.2, is_high=False, ts=ts),
+        ]
+        levels = cluster_sr_levels(points, atr=4.0, min_touches=2)
+
+        assert len(levels) == 1
+        assert levels[0].is_resistance is True
+
+    # ------------------------------------------------------------------
+    # F7: equal-high/low (double tops/bottoms) must be detected without
+    # spamming every bar of a flat top.
+    # ------------------------------------------------------------------
+
+    def _swing_df(self, highs: list[float], lows: list[float]) -> pd.DataFrame:
+        n = len(highs)
+        idx = pd.date_range(start=datetime(2026, 1, 1, tzinfo=UTC), periods=n, freq="1h")
+        return pd.DataFrame(
+            {
+                "open": highs,
+                "high": highs,
+                "low": lows,
+                "close": highs,
+                "volume": [1.0] * n,
+            },
+            index=idx,
+        )
+
+    def test_swing_detects_double_top_in_window(self) -> None:
+        """Two equal highs inside one window are NOT dropped (liquidity pool)."""
+        from rtrade.indicators.structure import detect_swing_points
+
+        # Two equal highs at 15 within a 5-bar window. The old `== 1`
+        # uniqueness check dropped BOTH; at least one must survive.
+        highs = [10.0, 11.0, 15.0, 12.0, 15.0, 11.0, 10.0]
+        lows = [5.0] * len(highs)
+        df = self._swing_df(highs, lows)
+
+        points = detect_swing_points(df)
+        swing_highs_at_15 = [p for p in points if p.is_high and p.price == 15.0]
+        assert len(swing_highs_at_15) >= 1
+
+    def test_swing_flat_top_yields_single_high(self) -> None:
+        """A flat top of 3+ equal bars yields EXACTLY one swing high (no spam)."""
+        from rtrade.indicators.structure import detect_swing_points
+
+        highs = [10.0, 11.0, 15.0, 15.0, 15.0, 11.0, 10.0]
+        lows = [5.0] * len(highs)
+        df = self._swing_df(highs, lows)
+
+        points = detect_swing_points(df)
+        swing_highs_at_15 = [p for p in points if p.is_high and p.price == 15.0]
+        assert len(swing_highs_at_15) == 1
+        # The single point must be the LEFTMOST bar of the flat top.
+        assert swing_highs_at_15[0].index == 2
+
+    def test_swing_detects_double_bottom_in_window(self) -> None:
+        """Symmetric: two equal lows inside one window are detected."""
+        from rtrade.indicators.structure import detect_swing_points
+
+        lows = [20.0, 19.0, 15.0, 18.0, 15.0, 19.0, 20.0]
+        highs = [25.0] * len(lows)
+        df = self._swing_df(highs, lows)
+
+        points = detect_swing_points(df)
+        swing_lows_at_15 = [p for p in points if not p.is_high and p.price == 15.0]
+        assert len(swing_lows_at_15) >= 1

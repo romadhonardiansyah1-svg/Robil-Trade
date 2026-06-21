@@ -10,6 +10,7 @@ The ingestion module bridges providers and persistence. It:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import TYPE_CHECKING
 
 import structlog
@@ -25,6 +26,12 @@ if TYPE_CHECKING:
     from rtrade.persistence.repositories import CandleRepo
 
 logger = structlog.get_logger(__name__)
+
+# Typical market-closed weekend span for non-crypto instruments: Friday close
+# through Sunday/Monday open. Used to size the weekend-suppression threshold per
+# timeframe (D4). ~67-72h covers the FX/metals weekend with a small holiday
+# cushion; we use 72h (3 days) as the documented upper bound.
+_WEEKEND_SPAN = timedelta(hours=72)
 
 
 def candle_to_row(candle: Candle, instrument_id: int) -> CandleRow:
@@ -58,6 +65,12 @@ def detect_candle_gaps(
         return []
 
     td = timeframe_duration(timeframe)
+    # Number of bars a typical closed weekend spans on THIS timeframe (D4).
+    # Derived from the timeframe duration instead of the old hardcoded `72`
+    # (which only made sense for H1): on D1 this is 3 bars, on H1 72 bars, on
+    # M5 864 bars. This stops real multi-week D1 gaps from being hidden and
+    # stops normal M5/M15 weekends from being spammed as false gaps.
+    weekend_bars = ceil(_WEEKEND_SPAN / td)
     gaps: list[tuple[datetime, datetime]] = []
 
     for i in range(1, len(candles)):
@@ -71,14 +84,11 @@ def detect_candle_gaps(
         missing_count = int((actual_ts - expected_ts) / td)
 
         if not is_crypto:
-            # Weekend gap: Friday → Monday is normal for FX/metals.
+            # Weekend gap: a gap that starts on/after Friday and is no larger
+            # than one weekend's worth of bars for this timeframe is expected
+            # for FX/metals and suppressed.
             prev_weekday = candles[i - 1].ts.weekday()
-            curr_weekday = actual_ts.weekday()
-            # Friday (4) close → Monday (0) open is expected.
-            if prev_weekday == 4 and curr_weekday == 0:
-                continue
-            # Also handle holiday gaps spanning 1-2 extra days.
-            if missing_count <= 72 and prev_weekday >= 4:  # up to 3 days off
+            if prev_weekday >= 4 and missing_count <= weekend_bars:  # Fri/Sat
                 continue
 
         if missing_count > max_consecutive_gaps:

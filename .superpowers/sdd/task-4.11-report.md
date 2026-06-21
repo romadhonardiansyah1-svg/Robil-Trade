@@ -95,7 +95,7 @@ preserved/strengthened, not deleted):
 
 ## Commit
 
-`fix(security): keyed-HMAC model integrity, fail closed (C3)` — hash: __PENDING__
+`fix(security): keyed-HMAC model integrity, fail closed (C3)` — hash: `1e80d8650e386627ad829889fa5d7435e2f620dd`
 
 ## Concerns
 

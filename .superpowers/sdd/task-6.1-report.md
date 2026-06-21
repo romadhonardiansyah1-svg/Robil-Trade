@@ -85,7 +85,7 @@ valid). No prior test had its expected values modified.
 
 ## Commit
 `fix(structure/data): order-independent S/R clustering + equal-extreme swings + tf-aware gap heuristic (F6,F7,D4)`
-Hash: <filled below>
+Hash: `6d1416bd8de8cc205f42838860917433504261b1`
 
 ## Concerns
 - F7 "leftmost in window" rule: when two equal highs fall inside the SAME fractal window,

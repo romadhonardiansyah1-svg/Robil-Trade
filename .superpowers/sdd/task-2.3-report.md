@@ -104,7 +104,7 @@ attribute 'kelly_risk_usd'` for B4; assertion failures for B3 abstain + true-ris
 
 ## Commit
 `fix(risk): abstain on min-lot over-risk + clamp/report Kelly risk (B3,B4)`
-Hash: __COMMIT_HASH__
+Hash: c10568e8f971fb6bfacac9255f4a5de6ee4c1c25
 
 ---
 

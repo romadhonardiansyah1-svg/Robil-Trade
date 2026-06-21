@@ -126,7 +126,7 @@ GREEN (after implementation):
 ## Commit
 
 `fix(safety): tz-aware regime timestamp + loud naive news-event warning (B5,B7)`
-Commit hash: <filled in below>
+Commit hash: `5b27d185b65a64c572cafff3734f8781e19b5f62`
 
 ## Concerns / follow-ups
 

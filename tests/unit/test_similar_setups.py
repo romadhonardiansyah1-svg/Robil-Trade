@@ -39,3 +39,29 @@ def test_insufficient_history() -> None:
     current = {"trend": 20, "momentum": 15, "structure": 15, "volume": 10, "macro": 15, "hour": 12}
     result = find_similar_setups(current, _make_history(10))
     assert result["n"] == 0
+
+
+def test_cyclic_hour_wraps_midnight_boundary() -> None:
+    """G2: hour 23 is adjacent in time to hour 0, so a current setup at hour 23
+    must be nearer to hour-0 history than to hour-12 history (all else equal).
+
+    With a linear hour/23 encoding hour 23 is closest to hour 12 -> selects the
+    losers; with cyclic (sin, cos) encoding it selects the hour-0 winners.
+    """
+    base = {"trend": 20, "momentum": 15, "structure": 15, "volume": 10, "macro": 15}
+    current = {**base, "hour": 23}
+
+    winners_at_midnight = [
+        {"confluence_breakdown": {**base, "hour": 0}, "outcome_r": 2.0} for _ in range(15)
+    ]
+    losers_at_noon = [
+        {"confluence_breakdown": {**base, "hour": 12}, "outcome_r": -1.0} for _ in range(15)
+    ]
+    history = winners_at_midnight + losers_at_noon
+
+    result = find_similar_setups(current, history, k=12)
+
+    assert result["n"] == 12
+    # All nearest neighbours are the hour-0 winners.
+    assert result["win_rate"] == 1.0
+    assert result["avg_r"] == 2.0

@@ -68,6 +68,12 @@ llm:
     max_usd_per_day: 5.0
     max_wall_seconds_per_scan: 45
     max_steps_per_scan: 8
+  # --- Adaptive cooldown pool (multi-account fallback) ---
+  # TTL cooldown per tier error. Tiap nilai harus di (0, 21600] detik (6 jam).
+  pool:
+    cooldown_seconds: 60              # 429 transient → cooldown singkat, langsung rotasi
+    auth_cooldown_seconds: 300        # auth error (key/token invalid) → cooldown menengah
+    subscription_cooldown_seconds: 18000  # limit langganan/usage-window (~5 jam, mis. ChatGPT/SuperGrok) → parkir lama
   # --- Credential pool (A6-A9) ---
   # Pool fallback dibangun OTOMATIS dari semua kredensial yang ada, urutan:
   #   1) API key family model analyst (slot 1..N), 2) API key family lain,

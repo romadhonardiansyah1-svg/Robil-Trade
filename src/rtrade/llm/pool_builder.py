@@ -183,4 +183,11 @@ def build_scan_pool(
         cred_ids=[e.cred_id for e in entries],
         primary_flavor=primary_flavor,
     )
-    return CredentialPool(entries, redis_client=redis_client)
+    pool_cfg = cfg.settings.llm.pool
+    return CredentialPool(
+        entries,
+        redis_client=redis_client,
+        cooldown_seconds=pool_cfg.cooldown_seconds,
+        auth_cooldown_seconds=pool_cfg.auth_cooldown_seconds,
+        subscription_cooldown_seconds=pool_cfg.subscription_cooldown_seconds,
+    )

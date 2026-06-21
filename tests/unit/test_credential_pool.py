@@ -177,3 +177,75 @@ def test_report_failure_default_cooldown() -> None:
     expiry = asyncio.run(run())
     # Default cooldown is 60s; well under 1000s in the future.
     assert expiry < time.time() + 1000
+
+
+def _adaptive_pool() -> CredentialPool:
+    entries = [
+        PooledCredential(cred_id="k0", flavor="gemini", credential=ApiKeyProvider("AIza0")),
+    ]
+    return CredentialPool(
+        entries,
+        cooldown_seconds=60,
+        auth_cooldown_seconds=300,
+        subscription_cooldown_seconds=18000,
+    )
+
+
+def test_report_failure_kind_selects_subscription_cooldown() -> None:
+    import time
+
+    pool = _adaptive_pool()
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="subscription_limit")
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    # ~now + 18000s
+    assert expiry > time.time() + 17000
+
+
+def test_report_failure_kind_selects_auth_cooldown() -> None:
+    import time
+
+    pool = _adaptive_pool()
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="auth")
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    # ~now + 300s: above 60s default, well below the 18000s subscription tier.
+    assert time.time() + 200 < expiry < time.time() + 1000
+
+
+def test_report_failure_kind_selects_rate_limit_cooldown() -> None:
+    import time
+
+    pool = _adaptive_pool()
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="rate_limit")
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    # ~now + 60s
+    assert expiry < time.time() + 200
+
+
+def test_report_failure_explicit_override_beats_kind() -> None:
+    import time
+
+    pool = _adaptive_pool()
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="rate_limit", cooldown_seconds=9999)
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    # Explicit 9999 override wins over the 60s rate_limit tier.
+    assert time.time() + 9000 < expiry < time.time() + 11000

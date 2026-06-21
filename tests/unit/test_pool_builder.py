@@ -134,3 +134,24 @@ def test_build_scan_pool_accepts_redis_client(monkeypatch, tmp_path) -> None:
 
     pool = build_scan_pool(cfg, redis_client=_FakeRedis())
     assert pool.size == 1
+
+
+def test_pool_threads_subscription_cooldown_from_config(monkeypatch, tmp_path) -> None:
+    """cfg.settings.llm.pool.subscription_cooldown_seconds dipakai pool yang dibangun."""
+    import asyncio
+    import time
+
+    cfg = _cfg(monkeypatch, tmp_path, gemini_api_key_1="AIza1")
+    # Custom subscription cooldown to prove config threading (not the 18000 default).
+    cfg.settings.llm.pool.subscription_cooldown_seconds = 12345
+    from rtrade.llm.pool_builder import build_scan_pool
+
+    pool = build_scan_pool(cfg)
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="subscription_limit")
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    assert time.time() + 12000 < expiry < time.time() + 13000

@@ -162,6 +162,8 @@ class CredentialPool:
         *,
         redis_client: Any | None = None,
         cooldown_seconds: int = 60,
+        auth_cooldown_seconds: int = 300,
+        subscription_cooldown_seconds: int = 18000,
     ) -> None:
         if not entries:
             raise ValueError("CredentialPool tidak boleh kosong")
@@ -170,6 +172,10 @@ class CredentialPool:
             raise ValueError(f"cred_id duplikat di pool: {ids}")
         self._entries = list(entries)
         self._by_id = {e.cred_id: e for e in entries}
+        # Adaptive cooldown TTLs keyed by failure kind.
+        self._rate_cooldown_seconds = cooldown_seconds
+        self._auth_cooldown_seconds = auth_cooldown_seconds
+        self._subscription_cooldown_seconds = subscription_cooldown_seconds
         self._km = KeyManager(
             redis_client,
             {_POOL_KEY: ids},
@@ -203,8 +209,21 @@ class CredentialPool:
     ) -> None:
         """Tandai kredensial gagal → cooldown.
 
-        kind hanya untuk logging. cooldown_seconds (opsional) meng-override TTL
-        cooldown; None = pakai default KeyManager.
+        TTL cooldown dipilih berdasarkan ``kind`` saat ``cooldown_seconds`` None:
+          - ``"subscription_limit"`` → ``subscription_cooldown_seconds`` (window panjang)
+          - ``"auth"``               → ``auth_cooldown_seconds``
+          - lainnya (``"rate_limit"``/``"other"``) → ``cooldown_seconds`` default
+        Argumen ``cooldown_seconds`` eksplisit selalu meng-override pilihan by-kind.
         """
-        logger.warning("credential failure — cooldown", cred_id=cred_id, kind=kind)
-        await self._km.report_rate_limit(_POOL_KEY, cred_id, cooldown_seconds=cooldown_seconds)
+        if cooldown_seconds is not None:
+            ttl = cooldown_seconds
+        elif kind == "subscription_limit":
+            ttl = self._subscription_cooldown_seconds
+        elif kind == "auth":
+            ttl = self._auth_cooldown_seconds
+        else:
+            ttl = self._rate_cooldown_seconds
+        logger.warning(
+            "credential failure — cooldown", cred_id=cred_id, kind=kind, cooldown_sec=ttl
+        )
+        await self._km.report_rate_limit(_POOL_KEY, cred_id, cooldown_seconds=ttl)

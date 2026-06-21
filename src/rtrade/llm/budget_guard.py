@@ -39,8 +39,15 @@ class BudgetGuard:
     def __init__(self, caps: LLMBudgetSettings) -> None:
         self._caps = caps
 
-    def start_scan(self) -> BudgetState:
-        return BudgetState()
+    def start_scan(self, *, day_usd_seed: float = 0.0) -> BudgetState:
+        """Begin a per-scan budget state.
+
+        ``day_usd_seed`` pre-loads the day's already-spent USD so the USD/day
+        cap binds ACROSS scans (B2). It is read from the Redis-backed daily-cost
+        store (UTC-date keyed) by the scan path. Default 0.0 keeps every
+        existing caller/test unchanged.
+        """
+        return BudgetState(day_usd=day_usd_seed)
 
     def reset_day_if_needed(self, state: BudgetState) -> None:
         today = datetime.now(UTC).date()

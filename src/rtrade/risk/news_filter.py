@@ -82,17 +82,9 @@ def check_news_blackout(
             continue
 
         raw_event_time = event.get("event_time")
-        if raw_event_time is None:
+        event_time = _parse_event_time(raw_event_time, event_name=event_name)
+        if event_time is None:
             continue
-        if isinstance(raw_event_time, str):
-            parsed = datetime.fromisoformat(raw_event_time.replace("Z", "+00:00"))
-            event_time = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
-        elif isinstance(raw_event_time, datetime):
-            event_time = raw_event_time
-        else:
-            continue
-
-        event_time = ensure_utc(event_time)
 
         if window_start <= event_time <= window_end:
             reason = (
@@ -106,15 +98,37 @@ def check_news_blackout(
     return False, None
 
 
-def _parse_event_time(raw: object) -> datetime | None:
-    """Parse event_time from various formats."""
+def _parse_event_time(raw: object, *, event_name: str = "") -> datetime | None:
+    """Parse event_time from various formats into a tz-aware UTC datetime.
+
+    Centralizes all tz handling for news events. DB events arrive tz-aware
+    (timestamptz) and are simply converted to UTC. A NAIVE event_time is a
+    fallback (e.g. a provider emitting bare timestamps); we keep assuming UTC
+    but emit a LOUD warning so a mis-tz'd provider is visible in logs rather
+    than silently shifting the blackout window by hours. (Full per-provider
+    source-tz verification is tracked separately as the B1 provider-hardening
+    follow-up.)
+    """
     if raw is None:
         return None
     if isinstance(raw, str):
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        event_time = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
-        return ensure_utc(event_time)
+        if parsed.tzinfo is None:
+            logger.warning(
+                "news event_time is naive — assuming UTC (verify provider timezone)",
+                event_name=event_name,
+                raw=raw,
+            )
+            parsed = parsed.replace(tzinfo=UTC)
+        return ensure_utc(parsed)
     if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            logger.warning(
+                "news event_time is naive — assuming UTC (verify provider timezone)",
+                event_name=event_name,
+                raw=raw,
+            )
+            raw = raw.replace(tzinfo=UTC)
         return ensure_utc(raw)
     return None
 
@@ -137,7 +151,9 @@ def high_impact_within(
         impact = str(event.get("impact", "low")).lower()
         if impact != "high" and not _is_always_high(str(event.get("event", ""))):
             continue
-        event_time = _parse_event_time(event.get("event_time"))
+        event_time = _parse_event_time(
+            event.get("event_time"), event_name=str(event.get("event", ""))
+        )
         if event_time is None:
             continue
         if now <= event_time <= window_end:

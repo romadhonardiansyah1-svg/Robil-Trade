@@ -128,14 +128,15 @@ def score_structure(
     score = 0
     tolerance = 0.5 * atr
 
-    # Check proximity to S/R.
-    for level in sr_levels:
-        if abs(entry - level.price) <= tolerance:
-            if action == Action.BUY and not level.is_resistance:
-                score += level.strength  # support confluence
-            elif action == Action.SELL and level.is_resistance:
-                score += level.strength
-            break  # count nearest only
+    # Check proximity to S/R: pick the TRUE nearest level (minimum absolute
+    # distance to entry) among those within tolerance, not the first by price.
+    in_tolerance = [lvl for lvl in sr_levels if abs(entry - lvl.price) <= tolerance]
+    if in_tolerance:
+        nearest = min(in_tolerance, key=lambda lvl: abs(lvl.price - entry))
+        if action == Action.BUY and not nearest.is_resistance:
+            score += nearest.strength  # support confluence
+        elif action == Action.SELL and nearest.is_resistance:
+            score += nearest.strength
 
     # Check if entry aligns with a gap zone.
     for gap in gap_zones:
@@ -162,13 +163,18 @@ def score_volume(
     if vol.sum() == 0:
         return 0  # no volume data (FX via TwelveData may lack tick volume)
 
-    sma20_vol = vol.rolling(20, min_periods=1).mean()
-    last_vol = float(vol.iloc[-1])
-    last_sma = float(sma20_vol.iloc[-1])
-
-    if last_sma == 0:
+    # Baseline SMA over the prior N bars EXCLUDING the current/trigger bar,
+    # matching edge_quality._volume_ratio's convention (which also excludes the
+    # current bar). Including it would bias the ratio low on a volume spike.
+    window = 20
+    if len(vol) < 2:
         return 0
-    ratio = last_vol / last_sma
+    baseline = float(vol.iloc[-(window + 1) : -1].mean())
+    last_vol = float(vol.iloc[-1])
+
+    if baseline <= 0:
+        return 0
+    ratio = last_vol / baseline
 
     if ratio >= 1.5:
         return max_score

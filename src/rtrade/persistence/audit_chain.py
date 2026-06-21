@@ -49,11 +49,23 @@ def build_chain_entry(
     return {"prev_hash": prev_hash, "row_hash": row_hash}
 
 
-def verify_chain(entries: list[dict[str, Any]]) -> tuple[bool, int]:
+def verify_chain(entries: list[dict[str, Any]], *, anchor_first: bool = False) -> tuple[bool, int]:
     """Verify a list of audit entries (dicts with stage, ok, signal_id, detail).
 
     Returns (True, count) if all hashes are consistent;
     (False, first_broken_index) if a chain break is found.
+
+    By default the chain is verified from the genesis anchor — the first entry's
+    ``prev_hash`` must equal ``"genesis"``. This is correct for whole-chain
+    verification but rejects any window that does not begin at the genesis row.
+
+    When ``anchor_first=True`` the first entry's *own* stored ``prev_hash`` is
+    used as the starting anchor instead of ``"genesis"``. This lets a "recent
+    rows" check verify the latest window even though its predecessor is outside
+    the window. The first row's predecessor *link* is therefore trusted (its
+    real predecessor isn't present to compare against), but the first row's own
+    content is still hash-verified, and every subsequent row is fully chained —
+    so inner tampering is still detected.
     """
     prev_hash = "genesis"
     for idx, entry in enumerate(entries):
@@ -61,6 +73,10 @@ def verify_chain(entries: list[dict[str, Any]]) -> tuple[bool, int]:
         chain = detail.get("_chain", {})
         stored_prev = chain.get("prev_hash", "")
         stored_hash = chain.get("row_hash", "")
+
+        # Recent-rows window: anchor on the first entry's claimed predecessor.
+        if idx == 0 and anchor_first:
+            prev_hash = stored_prev
 
         if stored_prev != prev_hash:
             return (False, idx)

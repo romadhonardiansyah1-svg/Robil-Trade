@@ -134,3 +134,61 @@ class TestExitHit:
             atr=3.0,
         )
         assert reason == "TP"
+
+
+class TestIntrabarPessimism:
+    """A2: adverse extreme is assumed to occur BEFORE the favorable extreme.
+
+    On a single post-fill bar whose favorable extreme would otherwise raise the
+    stop to breakeven (and take a partial), but whose adverse extreme is below
+    the ORIGINAL stop, the trade must be stopped at the original stop with NO
+    partial credited and NO breakeven move that bar.
+    """
+
+    def test_adverse_extreme_stops_before_partial_and_be(self) -> None:
+        cfg = _default_cfg()
+        state = ExitState(current_sl=95.0)
+        # BUY at 100, SL=95, TP=110. bar_high=106 (+1.2R favorable) would take a
+        # partial and move BE to 100; bar_low=94 is below the ORIGINAL stop (95).
+        state, reason = apply_smart_exit(
+            state,
+            cfg,
+            direction="BUY",
+            entry=100.0,
+            original_sl=95.0,
+            take_profit=110.0,
+            bar_high=106.0,
+            bar_low=94.0,
+            atr=3.0,
+        )
+        assert reason == "SL"
+        # Exit at the pre-update (original) stop, NOT the raised breakeven stop.
+        assert state.current_sl == pytest.approx(95.0)
+        # No partial credited, no breakeven move on the bar that stopped out.
+        assert state.partial_taken is False
+        assert state.be_moved is False
+        assert state.realized_r == pytest.approx(0.0)
+        assert state.remaining_pct == pytest.approx(1.0)
+
+    def test_sell_adverse_extreme_stops_before_partial_and_be(self) -> None:
+        cfg = _default_cfg()
+        state = ExitState(current_sl=105.0)
+        # SELL at 100, SL=105, TP=90. bar_low=94 (+1.2R favorable) would take a
+        # partial and move BE; bar_high=106 is above the ORIGINAL stop (105).
+        state, reason = apply_smart_exit(
+            state,
+            cfg,
+            direction="SELL",
+            entry=100.0,
+            original_sl=105.0,
+            take_profit=90.0,
+            bar_high=106.0,
+            bar_low=94.0,
+            atr=3.0,
+        )
+        assert reason == "SL"
+        assert state.current_sl == pytest.approx(105.0)
+        assert state.partial_taken is False
+        assert state.be_moved is False
+        assert state.realized_r == pytest.approx(0.0)
+        assert state.remaining_pct == pytest.approx(1.0)

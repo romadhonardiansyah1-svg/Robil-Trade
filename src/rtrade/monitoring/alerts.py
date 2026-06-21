@@ -138,7 +138,7 @@ class AlertManager:
             AlertType.PROVIDER_DOWN,
             AlertLevel.CRITICAL,
             f"Provider Down: {provider}",
-            f"Provider `{provider}` tidak merespons selama "
+            f"Provider {provider} tidak merespons selama "
             f"{duration_min:.0f} menit.\n"
             f"Data ingestion terganggu — sinyal mungkin tertunda.",
         )
@@ -160,8 +160,8 @@ class AlertManager:
             AlertType.SCAN_FAILED,
             AlertLevel.WARNING,
             f"Scan Failed: {instrument}",
-            f"Scan `{instrument}` gagal {consecutive}x berturut-turut.\n"
-            f"Error terakhir: `{error[:200]}`",
+            f"Scan {instrument} gagal {consecutive}x berturut-turut.\n"
+            f"Error terakhir: {error[:200]}",
         )
 
     async def alert_budget(self, spent_usd: float, budget_usd: float) -> bool:
@@ -193,7 +193,7 @@ class AlertManager:
             AlertType.SERVICE_UNHEALTHY,
             AlertLevel.CRITICAL,
             f"Service Unhealthy: {service}",
-            f"Service `{service}` dalam status UNHEALTHY.\nDetail: {message}",
+            f"Service {service} dalam status UNHEALTHY.\nDetail: {message}",
         )
 
     def reset_scan_failures(self, instrument: str) -> None:
@@ -217,11 +217,17 @@ class AlertManager:
         message: str,
         details: dict[str, Any] | None = None,
     ) -> str:
-        """Format alert for Telegram (MarkdownV2-safe)."""
+        """Format alert as plain text.
+
+        Sent with parse_mode=None so arbitrary dynamic content (error strings,
+        provider names, titles, detail keys/values) can contain Markdown
+        reserved characters without producing a 400 that silently drops the
+        alert. No Markdown markers are emitted in the structural template.
+        """
         now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
         lines = [
-            f"{level.value} *ROBIL TRADE ALERT*",
-            f"*{title}*",
+            f"{level.value} ROBIL TRADE ALERT",
+            title,
             "",
             message,
             "",
@@ -238,10 +244,11 @@ class AlertManager:
     async def _send_telegram(self, text: str) -> bool:
         """Send message via Telegram Bot API."""
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
-        payload = {
+        payload: dict[str, Any] = {
             "chat_id": self._chat_id,
             "text": text,
-            "parse_mode": "Markdown",
+            # Plain text: no parse mode, so dynamic content cannot break parsing.
+            "parse_mode": None,
             "disable_web_page_preview": True,
         }
 

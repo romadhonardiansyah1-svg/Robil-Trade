@@ -20,6 +20,7 @@ from rtrade.core.config import InstrumentConfig
 from rtrade.core.constants import Timeframe
 from rtrade.core.timeutil import timeframe_duration
 from rtrade.indicators.structure import GapZone, SRLevel
+from rtrade.risk.sizing import compute_position_size
 from rtrade.signals.confluence import ConfluenceContext, compute_confluence
 from rtrade.signals.edge_quality import EdgeQualityConfig, assess_edge_quality
 from rtrade.signals.levels import validate_and_round_levels
@@ -50,6 +51,7 @@ def generate_candidate(
     spread: float | None = None,
     edge_quality_enabled: bool = True,
     edge_quality_config: EdgeQualityConfig | None = None,
+    lot_step: float | None = None,
 ) -> SignalCandidate | None:
     """Run the full deterministic signal generation pipeline.
 
@@ -138,16 +140,44 @@ def generate_candidate(
         )
         return None
 
-    # 8. Position sizing.
+    # 8. Position sizing -- route through the single hardened sizing function so
+    #    the LIVE path inherits the GR-05 cap and the B3 min-lot abstain. The old
+    #    inline sizing duplicated this WITHOUT those safety guards.
     sl_dist = abs(levels.entry_limit - levels.stop_loss)
     if sl_dist == 0:
         return None
-    risk_amount = equity * (risk_pct / 100)
-    position_size = risk_amount / sl_dist
-    # Round to reasonable precision.
-    position_size = round(position_size, 4)
-    if position_size <= 0:
+    try:
+        sizing = compute_position_size(
+            equity,
+            risk_pct,
+            sl_dist,
+            pip_size=instrument.pip_size,
+            lot_step=lot_step,
+        )
+    except ValueError as exc:
+        # GR-05: risk_pct > 2.0 (or other invalid inputs) RAISES. Abstain with a
+        # clear warning instead of crashing the scan (risk_pct default is 1.0;
+        # this is defensive against a misconfigured value).
+        logger.warning(
+            "position sizing rejected, abstaining (GR-05 / invalid input)",
+            symbol=instrument.symbol,
+            risk_pct=risk_pct,
+            error=str(exc),
+        )
         return None
+
+    # B3: never emit a candidate that would over-risk. When the min-lot rounding
+    # would exceed the risk budget, compute_position_size abstains.
+    if sizing.method == "abstain_min_lot" or sizing.position_size <= 0.0:
+        logger.info(
+            "min-lot abstain, discarding candidate",
+            symbol=instrument.symbol,
+            method=sizing.method,
+            lot_step=lot_step,
+        )
+        return None
+
+    position_size = sizing.position_size
 
     # 9. Compute valid_until (bar close + valid_bars × timeframe).
     tf = timeframe

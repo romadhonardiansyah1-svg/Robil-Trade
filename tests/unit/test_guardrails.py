@@ -179,3 +179,101 @@ class TestGuardrailGate:
         # No GR-07 from staleness (may still have other failures).
         gr07_stale = [f for f in result.failures if f.gate_id == "GR-07" and "stale" in f.reason]
         assert len(gr07_stale) == 0
+
+
+class TestRequireFailClosed:
+    """B6: gates declared in ``require`` fail CLOSED when their input is omitted.
+
+    A caller that drops a safety gate's input must produce a REJECTION (with a
+    full audit trail), not a silent skip. ``require=None`` (default) keeps the
+    legacy behaviour so no-LLM / crypto paths and existing tests are unaffected.
+    """
+
+    _MISSING_REASON = "required input missing"
+
+    def test_gr08_required_but_regime_missing_rejects(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(candidate, require={"GR-08"})  # regime omitted
+        assert not result.passed
+        gr08 = [f for f in result.failures if f.gate_id == "GR-08"]
+        assert gr08, "GR-08 required-but-missing was NOT a failure"
+        assert self._MISSING_REASON in gr08[0].reason
+
+    def test_gr06_required_but_candle_ts_missing_rejects(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(candidate, require={"GR-06"})  # latest_candle_ts omitted
+        assert not result.passed
+        gr06 = [f for f in result.failures if f.gate_id == "GR-06"]
+        assert gr06, "GR-06 required-but-missing was NOT a failure"
+        assert self._MISSING_REASON in gr06[0].reason
+
+    def test_gr07_required_but_events_missing_rejects(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        # events + related_currencies omitted -> news gate cannot be evaluated
+        result = run_gate(candidate, require={"GR-07"})
+        assert not result.passed
+        gr07 = [f for f in result.failures if f.gate_id == "GR-07"]
+        assert gr07, "GR-07 required-but-missing was NOT a failure"
+        assert self._MISSING_REASON in gr07[0].reason
+
+    def test_gr09_required_but_confidence_missing_rejects(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(candidate, require={"GR-09"})  # confidence omitted
+        assert not result.passed
+        assert any(
+            f.gate_id == "GR-09" and self._MISSING_REASON in f.reason for f in result.failures
+        )
+
+    def test_gr11_required_but_sources_missing_rejects(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(candidate, require={"GR-11"})  # sources omitted
+        assert not result.passed
+        assert any(
+            f.gate_id == "GR-11" and self._MISSING_REASON in f.reason for f in result.failures
+        )
+
+    def test_gr13_required_but_outcomes_missing_rejects(self) -> None:
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(candidate, require={"GR-13"})  # paper_outcomes omitted
+        assert not result.passed
+        assert any(
+            f.gate_id == "GR-13" and self._MISSING_REASON in f.reason for f in result.failures
+        )
+
+    def test_required_gate_passes_when_input_present(self) -> None:
+        """Requiring a gate whose input IS supplied must NOT add a missing-input failure."""
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(
+            candidate,
+            require={"GR-06", "GR-08"},
+            latest_candle_ts=datetime(2026, 7, 1, 6, 0, tzinfo=UTC),
+            timeframe=Timeframe.H1,
+            regime=Regime.TREND,
+            required_regime=Regime.TREND,
+            now=datetime(2026, 7, 1, 6, 1, tzinfo=UTC),
+        )
+        missing = [f for f in result.failures if self._MISSING_REASON in f.reason]
+        assert not missing, [f.reason for f in result.failures]
+        assert result.passed
+
+    def test_require_none_is_backward_compatible(self) -> None:
+        """Default (require=None) keeps the legacy skip-when-absent behaviour."""
+        from rtrade.guardrails.gate import run_gate
+
+        candidate = _make_candidate()
+        result = run_gate(candidate)  # no require, no optional inputs
+        assert result.passed

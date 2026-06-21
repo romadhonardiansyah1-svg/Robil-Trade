@@ -2,23 +2,45 @@
 
 Computes Euclidean distance on normalized confluence breakdown features
 to find the k most similar historical trades and their outcomes.
+
+Hour-of-day is cyclic-encoded as (sin, cos) of the 24h angle so that
+adjacent hours across the midnight boundary (e.g. 23 and 0) are close,
+rather than maximally distant under a naive linear hour/23 scaling.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 # Feature normalization ranges (from confluence breakdown max scores).
+# NOTE: `hour` is intentionally absent here — it is cyclic-encoded separately
+# into two (sin, cos) components which are already in [-1, 1] and need no
+# range normalization.
 _FEATURE_RANGES: dict[str, float] = {
     "trend": 25.0,
     "momentum": 20.0,
     "structure": 20.0,
     "volume": 15.0,
     "macro": 20.0,
-    "hour": 23.0,
 }
+
+
+def _cyclic_hour(hour: float) -> tuple[float, float]:
+    """Encode hour-of-day (0-23) as (sin, cos) of its 24h angle."""
+    angle = 2.0 * math.pi * hour / 24.0
+    return math.sin(angle), math.cos(angle)
+
+
+def _feature_vector(values: dict[str, Any], hour: float) -> npt.NDArray[np.float64]:
+    """Build the normalized + cyclic-hour feature vector for one setup."""
+    vec = [float(values.get(f, 0.0)) / _FEATURE_RANGES[f] for f in _FEATURE_RANGES]
+    sin_h, cos_h = _cyclic_hour(hour)
+    vec.extend((sin_h, cos_h))
+    return np.array(vec, dtype=float)
 
 
 def find_similar_setups(
@@ -41,19 +63,14 @@ def find_similar_setups(
     if len(history) < 30:
         return {"n": 0}
 
-    features = list(_FEATURE_RANGES.keys())
-
-    # Normalize current features.
-    curr_vec = np.array([current.get(f, 0.0) / _FEATURE_RANGES[f] for f in features], dtype=float)
+    # Normalize current features (cyclic hour from top-level).
+    curr_vec = _feature_vector(current, float(current.get("hour", 0.0)))
 
     # Compute distances.
     distances: list[tuple[float, dict[str, Any]]] = []
     for h in history:
         breakdown = h.get("confluence_breakdown", {})
-        h_vec = np.array(
-            [breakdown.get(f, 0.0) / _FEATURE_RANGES[f] for f in features],
-            dtype=float,
-        )
+        h_vec = _feature_vector(breakdown, float(breakdown.get("hour", 0.0)))
         dist = float(np.linalg.norm(curr_vec - h_vec))
         distances.append((dist, h))
 

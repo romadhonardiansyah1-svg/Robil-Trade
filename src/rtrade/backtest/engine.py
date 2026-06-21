@@ -89,11 +89,17 @@ def run_backtest(
     """
     highs = df["high"].astype(float).values
     lows = df["low"].astype(float).values
-    df["open"].astype(float).values
+    opens = df["open"].astype(float).values
     n_bars = len(df)
 
+    # ``equity`` is the RUNNING basis used for risk sizing. Sizing intentionally
+    # stays in signal order (each trade risks ``risk_pct`` of the equity standing
+    # when its signal is processed), exactly as before — this keeps the
+    # single-position / non-overlapping case byte-for-byte unchanged. The equity
+    # CURVE, however, is rebuilt in chronological (exit-time) order after the loop
+    # (A10) so that drawdown/return reflect real time order rather than signal
+    # order. PnL is order-independent, so ``final_equity`` is identical either way.
     equity = initial_equity
-    equity_curve = [equity]
     trades: list[Trade] = []
 
     # Create Trade objects from signals.
@@ -140,6 +146,12 @@ def run_backtest(
 
         # Phase 2: After fill, check SL/TP on subsequent bars.
         # If smart_exit is configured, use apply_smart_exit per bar.
+        # Realized-leg accounting (A1): partials close part of the position early;
+        # the remaining fraction exits at the final exit price. Defaults describe a
+        # plain full-position trade (no partial) so the non-smart path is unchanged.
+        realized_r = 0.0
+        remaining_pct = 1.0
+        partial_taken = False
         if smart_exit is not None:
             fill_price = trade.fill_price
             assert fill_price is not None  # guaranteed by the fill phase above
@@ -165,11 +177,22 @@ def run_backtest(
                 if exit_reason is not None:
                     trade.exit_bar = i
                     if exit_reason == "SL":
-                        trade.exit_price = exit_state.current_sl
+                        # A9: a stop order slips with a gap. If the bar OPENED
+                        # beyond the stop, fill at the worse of the stop and open.
+                        sl_level = exit_state.current_sl
+                        bar_open = float(opens[i])
+                        if trade.direction == "BUY":
+                            trade.exit_price = min(sl_level, bar_open)
+                        else:
+                            trade.exit_price = max(sl_level, bar_open)
                     else:
                         trade.exit_price = trade.take_profit
                     trade.exit_reason = exit_reason
                     break
+            # Capture realized-leg accounting from the final smart-exit state.
+            realized_r = exit_state.realized_r
+            remaining_pct = exit_state.remaining_pct
+            partial_taken = exit_state.partial_taken
         else:
             for i in range(trade.fill_bar, n_bars):  # type: ignore[arg-type]
                 if i == trade.fill_bar:
@@ -192,11 +215,19 @@ def run_backtest(
                 # If BOTH hit in same bar → SL first (worst-case assumption).
                 if (sl_hit and tp_hit) or sl_hit:
                     trade.exit_bar = i
-                    trade.exit_price = trade.stop_loss
+                    # A9: a stop order slips with a gap. If the bar OPENED beyond
+                    # the stop, fill at the worse of the stop level and the open.
+                    bar_open = float(opens[i])
+                    if trade.direction == "BUY":
+                        trade.exit_price = min(trade.stop_loss, bar_open)
+                    else:
+                        trade.exit_price = max(trade.stop_loss, bar_open)
                     trade.exit_reason = "SL"
                     break
                 elif tp_hit:
                     trade.exit_bar = i
+                    # A9: a take-profit is a limit order — a gap THROUGH the level
+                    # does not give a better fill, so it fills at exactly the TP.
                     trade.exit_price = trade.take_profit
                     trade.exit_reason = "TP"
                     break
@@ -209,10 +240,11 @@ def run_backtest(
 
         # Calculate PnL and R-multiple.
         if trade.fill_price is not None and trade.exit_price is not None:
+            # Final leg R: the remaining (unclosed) fraction exits at exit_price.
             if trade.direction == "BUY":
-                raw_pnl = trade.exit_price - trade.fill_price
+                final_leg_r_num = trade.exit_price - trade.fill_price
             else:
-                raw_pnl = trade.fill_price - trade.exit_price
+                final_leg_r_num = trade.fill_price - trade.exit_price
 
             # Apply costs.
             trade.cost = 0.0
@@ -221,18 +253,47 @@ def run_backtest(
 
             sl_dist = abs(trade.fill_price - trade.stop_loss)
             if sl_dist > 0:
-                # Risk-based sizing.
+                # Total realized R = closed partial legs + remaining leg at exit.
+                final_leg_r = final_leg_r_num / sl_dist
+                gross_r = realized_r + remaining_pct * final_leg_r
+
+                # Costs (conservative): a full round-turn is charged on the whole
+                # position (cost / sl_dist in R terms). A partial fill adds an
+                # extra exit-side crossing on the closed fraction, so we charge an
+                # additional half round-turn on that fraction. This never
+                # under-counts costs relative to the plain full-position trade.
+                cost_r = trade.cost / sl_dist
+                if partial_taken:
+                    closed_fraction = 1.0 - remaining_pct
+                    cost_r += (trade.cost / 2.0) * closed_fraction / sl_dist
+
+                net_r = gross_r - cost_r
+
+                # Risk-based sizing: full position risking sl_dist == risk_amount,
+                # so PnL scales as net_r * risk_amount.
                 risk_amount = equity * (risk_pct / 100)
-                position_size = risk_amount / sl_dist
-                trade.pnl = (raw_pnl - trade.cost) * position_size
-                trade.r_multiple = (raw_pnl - trade.cost) / sl_dist
+                trade.r_multiple = net_r
+                trade.pnl = net_r * risk_amount
             else:
                 trade.pnl = 0.0
                 trade.r_multiple = 0.0
 
             equity += trade.pnl or 0.0
 
-        equity_curve.append(equity)
+    # A10: build the equity curve in chronological (exit-time) order. Sizing/PnL
+    # above is unchanged; only the order in which realized PnL is accumulated into
+    # the curve changes. Sort filled trades by exit_bar (then fill_bar as a stable
+    # tie-break) so overlapping trades book in the order they actually closed. For
+    # non-overlapping trades this order equals signal order, so the curve is
+    # identical to before.
+    curve_equity = initial_equity
+    equity_curve = [curve_equity]
+    for trade in sorted(
+        (t for t in trades if t.fill_price is not None and t.pnl is not None),
+        key=_curve_order_key,
+    ):
+        curve_equity += trade.pnl or 0.0
+        equity_curve.append(curve_equity)
 
     return BacktestResult(
         trades=trades,
@@ -240,6 +301,17 @@ def run_backtest(
         initial_equity=initial_equity,
         final_equity=equity,
     )
+
+
+def _curve_order_key(trade: Trade) -> tuple[int, int]:
+    """Chronological sort key for equity-curve accumulation (exit_bar, fill_bar).
+
+    Only invoked for filled trades, whose ``exit_bar`` and ``fill_bar`` are always
+    set by the time the curve is built.
+    """
+    assert trade.exit_bar is not None
+    assert trade.fill_bar is not None
+    return (trade.exit_bar, trade.fill_bar)
 
 
 def _as_int(value: Any, field_name: str) -> int:

@@ -146,3 +146,27 @@ class TestTokenNotConfigured:
             tc = TestClient(app)
             resp = tc.get("/signals", headers={"Authorization": "Bearer some-token"})
             assert resp.status_code == 503
+
+    @pytest.mark.parametrize("missing_token", ["", None])
+    def test_require_bearer_503_when_token_unset(self, missing_token: str | None) -> None:
+        """C1: fail closed — `_require_bearer` raises HTTPException(503) when the
+        configured `api_auth_token` is empty/None (e.g. API_AUTH_TOKEN env unset).
+        Asserts the unit directly, independent of the HTTP layer."""
+        from fastapi import HTTPException
+
+        from rtrade.delivery.api.routes import _auth_failures, _require_bearer
+
+        _auth_failures.clear()
+
+        mock_secrets = MagicMock()
+        mock_secrets.api_auth_token = missing_token
+        mock_cfg = MagicMock()
+        mock_cfg.secrets = mock_secrets
+
+        with pytest.raises(HTTPException) as exc_info:
+            _require_bearer(
+                "Bearer some-token",
+                mock_cfg,
+                client_ip="test-c1-unset",
+            )
+        assert exc_info.value.status_code == 503

@@ -58,3 +58,16 @@ class TestBudgetGuard:
         state = guard.start_scan()
         result = guard.record(state, tokens=100, usd=0.01, steps=1)
         assert result is None
+
+    def test_seed_default_unchanged(self, guard: BudgetGuard) -> None:
+        # Default seed keeps existing behavior: day_usd starts at 0.0.
+        state = guard.start_scan()
+        assert state.day_usd == 0.0
+
+    def test_seed_carries_prior_spend(self, guard: BudgetGuard) -> None:
+        # B2: seeding prior daily spend makes the USD/day cap bind ACROSS scans.
+        # Seed 0.9 of a 1.0 cap, then a tiny 0.2 in this scan trips usd_day.
+        state = guard.start_scan(day_usd_seed=0.9)
+        assert state.day_usd == 0.9
+        result = guard.record(state, usd=0.2)  # 0.9 + 0.2 = 1.1 >= 1.0
+        assert result == "usd_day"

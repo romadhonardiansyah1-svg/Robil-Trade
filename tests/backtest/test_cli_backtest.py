@@ -57,6 +57,7 @@ def _passing_metrics() -> BacktestMetrics:
         expectancy=0.25,
         profit_factor=1.5,
         sharpe_ratio=2.0,
+        sharpe_per_trade=2.0,
         max_drawdown_pct=10.0,
         avg_win_r=1.2,
         avg_loss_r=-0.8,

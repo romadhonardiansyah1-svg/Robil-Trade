@@ -58,9 +58,9 @@ class MetaLabelEvaluation:
     auc_roc: float
     n_folds: int
     n_samples: int
-    expectancy_filtered: float  # expectancy using only should_trade=True
-    expectancy_unfiltered: float  # expectancy without filter
-    improvement_pct: float  # % improvement in expectancy
+    expectancy_filtered: float  # OOS expectancy using only should_trade=True
+    expectancy_unfiltered: float  # OOS expectancy without filter
+    improvement_pct: float  # % improvement in OOS expectancy
 
 
 class MetaLabeler:
@@ -130,7 +130,8 @@ class MetaLabeler:
                 - bar_ts (datetime)
 
         Returns:
-            DataFrame with features + 'label' (1=TP hit, 0=SL hit).
+            DataFrame with features + 'label' (1=TP hit, 0=SL hit) + 'outcome_r'
+            (raw R-multiple, carried for the expectancy gate; NOT a feature).
         """
         rows = []
         for t in trades:
@@ -138,6 +139,12 @@ class MetaLabeler:
             label = 1 if outcome_r > 0 else 0
 
             row: dict[str, Any] = {"label": label}
+
+            # Carry the raw R-multiple through so the promotion gate can compute
+            # expectancy. NOTE: outcome_r is the target's magnitude, NOT a
+            # training feature — it is intentionally kept out of FEATURE_COLUMNS
+            # (including it would leak the label).
+            row["outcome_r"] = outcome_r
 
             # Confluence breakdown.
             row["confluence_trend"] = t.get("confluence_trend", 0)
@@ -180,7 +187,9 @@ class MetaLabeler:
             df: Output of prepare_labels() with features + label.
 
         Returns:
-            MetaLabelEvaluation with accuracy metrics.
+            MetaLabelEvaluation with accuracy metrics. Expectancy metrics
+            (filtered/unfiltered/improvement) are computed OUT-OF-SAMPLE from
+            the out-of-fold CV predictions, not the in-sample refit.
         """
         from sklearn.metrics import (
             accuracy_score,
@@ -193,6 +202,7 @@ class MetaLabeler:
 
         X = df[self.FEATURE_COLUMNS].values
         y = df["label"].values
+        outcome_r_all = df["outcome_r"].to_numpy() if "outcome_r" in df.columns else None
 
         if len(X) < 50:
             raise ValueError(f"insufficient training data: {len(X)} samples (need ≥50)")
@@ -202,6 +212,9 @@ class MetaLabeler:
         tscv = TimeSeriesSplit(n_splits=max(2, n_folds))
 
         fold_metrics: list[dict[str, float]] = []
+        # Out-of-fold (OOS) collectors for the expectancy gate (ADR-A08).
+        oos_proba: list[float] = []
+        oos_outcome_r: list[float] = []
 
         for _fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
             # Embargo: remove `embargo_bars` from end of training.
@@ -221,6 +234,11 @@ class MetaLabeler:
 
             y_pred = model.predict(X_test)
             y_proba = model.predict_proba(X_test)[:, 1]
+
+            # Collect OOS predictions + aligned outcomes for the expectancy gate.
+            if outcome_r_all is not None:
+                oos_proba.extend(float(p) for p in y_proba)
+                oos_outcome_r.extend(float(r) for r in outcome_r_all[test_idx])
 
             fold_metrics.append(
                 {
@@ -247,17 +265,21 @@ class MetaLabeler:
         # Average CV metrics.
         avg = {k: np.mean([m[k] for m in fold_metrics]) for k in fold_metrics[0]}
 
-        # Compute expectancy improvement.
-        outcome_r = df.get("outcome_r")
-        unfiltered_exp = float(outcome_r.mean()) if outcome_r is not None else 0.0
+        # Compute the PROMOTION GATE expectancy OUT-OF-SAMPLE (ADR-A08).
+        # Both expectancies are derived from out-of-fold predictions collected
+        # during the CV loop above — never from the in-sample refit — so the
+        # filtered expectancy cannot look ahead. The refit-on-all model
+        # (self._model) is still kept for deployment/inference only.
+        oos_r = np.asarray(oos_outcome_r, dtype=float)
+        oos_p = np.asarray(oos_proba, dtype=float)
 
-        # Predict on full dataset to estimate filtered expectancy.
-        proba = final_model.predict_proba(X)[:, 1]
-        mask = proba >= self._threshold
-        if mask.sum() > 0 and outcome_r is not None:
-            filtered_exp = float(outcome_r[mask].mean())
+        if oos_r.size > 0:
+            unfiltered_exp = float(oos_r.mean())
+            mask = oos_p >= self._threshold
+            filtered_exp = float(oos_r[mask].mean()) if mask.any() else unfiltered_exp
         else:
-            filtered_exp = unfiltered_exp
+            unfiltered_exp = 0.0
+            filtered_exp = 0.0
 
         improvement = 0.0
         if abs(unfiltered_exp) > 0.001:

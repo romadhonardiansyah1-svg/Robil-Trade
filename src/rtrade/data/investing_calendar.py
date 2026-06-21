@@ -167,8 +167,32 @@ class InvestingCalendarProvider(CalendarProvider):
         if resp.status_code >= 400:
             raise ProviderError(f"Investing HTTP {resp.status_code}: {resp.text[:200]}")
 
-        body = resp.json()
-        raw_events = body.get("data") or body.get("events") or body.get("economicCalendar") or []
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            # JSONDecodeError (a ValueError subclass): a non-2xx-but-unparseable
+            # body is a provider failure, NOT an empty calendar.
+            raise ProviderError(f"Investing calendar: invalid JSON body: {exc}") from exc
+
+        if not isinstance(body, dict):
+            raise ProviderError(
+                f"Investing calendar: unexpected response shape: {type(body).__name__}"
+            )
+
+        # Locate the events container. A genuinely-empty calendar has the key
+        # present with an empty list; a response with NO recognized container is
+        # schema drift and must RAISE (else a broken source masquerades as empty).
+        raw_events = body.get("data")
+        if raw_events is None:
+            raw_events = body.get("events")
+        if raw_events is None:
+            raw_events = body.get("economicCalendar")
+        if raw_events is None:
+            raise ProviderError(
+                "Investing calendar: response missing events container (schema drift)"
+            )
+        if not isinstance(raw_events, list):
+            raise ProviderError("Investing calendar: events container is not a list (schema drift)")
         if not raw_events:
             logger.info(
                 "Investing returned no events",

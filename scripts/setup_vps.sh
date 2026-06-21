@@ -173,7 +173,17 @@ install_prerequisites() {
         success "Docker already installed: v${docker_version}"
     else
         info "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh > /dev/null 2>&1
+        # Hardening (E6): never pipe a remote script straight into a shell
+        # (`curl ... | sh` is unverified remote code execution). Download
+        # Docker's official installer to a local file first so it can be
+        # inspected/audited, then execute the local copy. This preserves the
+        # provisioning flow (installs docker-ce + the compose v2 plugin that
+        # the check below relies on) while removing the curl|sh RCE path.
+        local docker_install
+        docker_install="$(mktemp)"
+        curl -fsSL https://get.docker.com -o "$docker_install"
+        sh "$docker_install" > /dev/null 2>&1
+        rm -f "$docker_install"
         success "Docker installed: $(docker --version | awk '{print $3}' | tr -d ',')"
     fi
     

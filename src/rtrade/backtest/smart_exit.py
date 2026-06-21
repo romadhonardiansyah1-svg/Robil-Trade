@@ -53,6 +53,13 @@ def apply_smart_exit(
 ) -> tuple[ExitState, str | None]:
     """Process one bar through smart exit logic.
 
+    Uses a pessimistic intrabar model (A2): the adverse extreme is assumed to
+    occur before the favorable extreme. The stop as it stood at the START of the
+    bar is tested first; if hit, the trade exits at that pre-update stop and no
+    partial / breakeven / trailing update is applied on this bar. Only if the
+    stop survives are the favorable-extreme updates applied (affecting subsequent
+    bars) and TP checked.
+
     Returns:
         Updated state and exit_reason (None if trade continues).
     """
@@ -65,7 +72,28 @@ def apply_smart_exit(
         extreme = bar_low
         adverse = bar_high
 
-    # Current distance from entry in R.
+    # --- Pessimistic intrabar ordering (A2) ---
+    # Assume the ADVERSE extreme occurs BEFORE the favorable extreme. First test
+    # the stop AS IT WAS AT BAR START (before any update this bar). If it is hit,
+    # exit at that pre-update stop and do NOT take a partial / move BE / trail on
+    # this bar. This also preserves the worst-case rule: if both the stop and TP
+    # would be touched this bar, the stop wins.
+    stop_at_bar_start = state.current_sl
+    if direction == "BUY":
+        sl_hit = adverse <= stop_at_bar_start
+        tp_hit = extreme >= take_profit
+    else:
+        sl_hit = adverse >= stop_at_bar_start
+        tp_hit = extreme <= take_profit
+
+    if sl_hit:
+        return state, "SL"
+
+    # Stop survived the adverse extreme. Now apply favorable-extreme updates
+    # (partial TP / breakeven / trailing) which take effect on SUBSEQUENT bars,
+    # then check TP against the favorable extreme.
+
+    # Current distance from entry in R (favorable extreme).
     if direction == "BUY":
         current_r = (extreme - entry) / sl_dist
     else:
@@ -97,20 +125,6 @@ def apply_smart_exit(
             if trail_sl < state.current_sl:
                 state.current_sl = trail_sl
 
-    # --- Check SL/TP hit ---
-    sl_hit = False
-    tp_hit = False
-    if direction == "BUY":
-        sl_hit = adverse <= state.current_sl
-        tp_hit = extreme >= take_profit
-    else:
-        sl_hit = adverse >= state.current_sl
-        tp_hit = extreme <= take_profit
-
-    if sl_hit and tp_hit:
-        return state, "SL"  # worst-case
-    if sl_hit:
-        return state, "SL"
     if tp_hit:
         return state, "TP"
 

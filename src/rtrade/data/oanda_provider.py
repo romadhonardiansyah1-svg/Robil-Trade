@@ -98,6 +98,13 @@ class OandaProvider(MarketDataProvider):
             "price": "M",
             "from": since_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "count": min(limit, 5000),
+            # D2: force UTC day-boundary alignment. Without these OANDA defaults to
+            # 17:00 America/New_York daily alignment, which shifts D/H4 bar-open
+            # times off the UTC grid the rest of the system assumes (breaking the
+            # anti-look-ahead cutoff, DST gap detection, and cross-provider MTF
+            # alignment). Harmless for M1/M5/M15/H1, so sent unconditionally.
+            "alignmentTimezone": "UTC",
+            "dailyAlignment": 0,
         }
         try:
             resp = await self._http.get(f"/v3/instruments/{symbol}/candles", params=params)

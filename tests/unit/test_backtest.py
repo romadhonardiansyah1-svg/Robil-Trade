@@ -6,7 +6,7 @@ import pytest
 
 from rtrade.backtest.costs import CostModel
 from rtrade.backtest.engine import run_backtest
-from rtrade.backtest.metrics import compute_metrics
+from rtrade.backtest.metrics import PROFIT_FACTOR_CAP, compute_metrics
 
 
 def _make_ohlcv(n: int = 100) -> pd.DataFrame:
@@ -118,7 +118,8 @@ class TestBacktestMetrics:
         metrics = compute_metrics(r_multiples, equity)
         assert metrics.win_rate == 1.0
         assert metrics.expectancy == 2.0
-        assert metrics.profit_factor == float("inf")
+        # A13: zero-loss profit factor is a finite sentinel cap, not +inf.
+        assert metrics.profit_factor == pytest.approx(PROFIT_FACTOR_CAP)
 
     def test_all_losses(self) -> None:
         r_multiples = [-1.0, -1.0, -1.0]

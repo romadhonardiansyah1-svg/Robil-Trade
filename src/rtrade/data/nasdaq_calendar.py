@@ -161,9 +161,22 @@ class NasdaqCalendarProvider(CalendarProvider):
         if resp.status_code >= 400:
             raise ProviderError(f"Nasdaq HTTP {resp.status_code}: {resp.text[:200]}")
 
-        body = resp.json()
-        raw_data = body.get("datatable", {}).get("data", [])
-        columns = [c.get("name", "") for c in body.get("datatable", {}).get("columns", [])]
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ProviderError(f"Nasdaq: invalid JSON body: {exc}") from exc
+
+        if not isinstance(body, dict):
+            raise ProviderError(f"Nasdaq: unexpected response shape: {type(body).__name__}")
+        datatable = body.get("datatable")
+        if not isinstance(datatable, dict):
+            raise ProviderError("Nasdaq: response missing 'datatable' object (schema drift)")
+        raw_data = datatable.get("data")
+        if raw_data is None:
+            raise ProviderError("Nasdaq: 'datatable.data' missing (schema drift)")
+        if not isinstance(raw_data, list):
+            raise ProviderError("Nasdaq: 'datatable.data' is not a list (schema drift)")
+        columns = [c.get("name", "") for c in datatable.get("columns", [])]
 
         if not raw_data:
             logger.info(

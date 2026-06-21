@@ -9,12 +9,15 @@ costs:
     commission_pct_round_turn: 0.007  # ~$7/lot RT
     slippage_pct_per_side: 0.010
     pip_size: 0.01
+    contract_size: 100              # oz per standard lot
   EURUSD:
     spread_pips_round_turn: 0.9
     commission_usd_per_lot_round_turn: 7.0
     slippage_pips_per_side: 0.2
     pip_size: 0.0001
+    contract_size: 100000           # units per standard lot
   BTCUSDT:
     taker_fee_pct_per_side: 0.10
     slippage_pct_per_side: 0.03
     pip_size: 0.1
+    contract_size: 1                # 1 BTC per lot

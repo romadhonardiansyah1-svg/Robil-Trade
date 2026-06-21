@@ -97,3 +97,61 @@ async def test_close_closes_all_legs() -> None:
     comp = CompositeMarketDataProvider([("a", a), ("b", b)])
     await comp.close()
     assert a.closed and b.closed
+
+
+# ============================================================================
+# E5: fetch_spread must fail over per-leg instead of aborting the whole lookup
+# ============================================================================
+
+
+class _SpreadLeg(MarketDataProvider):
+    def __init__(self, *, spread: float | None = None, fail: Exception | None = None) -> None:
+        self.spread = spread
+        self.fail = fail
+        self.spread_calls = 0
+
+    async def fetch_ohlcv(
+        self, symbol: str, timeframe: Timeframe, since: datetime, limit: int = 500
+    ) -> list[Candle]:
+        return [_candle()]
+
+    async def fetch_quote(self, symbol: str) -> Quote:
+        return Quote(symbol=symbol, price=Decimal("2600"), ts=datetime.now(UTC))
+
+    async def fetch_spread(self, symbol: str) -> float | None:
+        self.spread_calls += 1
+        if self.fail is not None:
+            raise self.fail
+        return self.spread
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_fetch_spread_fails_over_to_next_leg_on_error() -> None:
+    a = _SpreadLeg(fail=RuntimeError("unexpected boom"))
+    b = _SpreadLeg(spread=0.42)
+    comp = CompositeMarketDataProvider([("a", a), ("b", b)])
+    out = await comp.fetch_spread("XAU_USD")
+    assert out == 0.42
+    assert a.spread_calls == 1 and b.spread_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_spread_returns_none_when_all_legs_fail() -> None:
+    a = _SpreadLeg(fail=ProviderError("down"))
+    b = _SpreadLeg(fail=RuntimeError("boom"))
+    comp = CompositeMarketDataProvider([("a", a), ("b", b)])
+    out = await comp.fetch_spread("XAU_USD")
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_spread_first_successful_leg_wins() -> None:
+    a = _SpreadLeg(spread=0.10)
+    b = _SpreadLeg(spread=0.20)
+    comp = CompositeMarketDataProvider([("a", a), ("b", b)])
+    out = await comp.fetch_spread("XAU_USD")
+    assert out == 0.10
+    assert a.spread_calls == 1 and b.spread_calls == 0

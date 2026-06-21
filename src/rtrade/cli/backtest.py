@@ -25,7 +25,7 @@ import pandas as pd
 import structlog
 import yaml
 
-from rtrade.backtest.costs import load_cost_models
+from rtrade.backtest.costs import get_cost_model
 from rtrade.backtest.harness import run_walkforward_harness
 from rtrade.backtest.metrics import BacktestMetrics
 from rtrade.backtest.validation import ValidationGateResult, run_validation_gates
@@ -128,7 +128,10 @@ def _print_report(
     _out(f"Profit factor: {vgr.profit_factor_oos:.2f}")
     _out(f"Max DD:        {vgr.max_drawdown_pct:.2f}%")
     _out(f"DSR prob:      {vgr.dsr_probability:.4f}")
-    _out(f"PBO:           {vgr.pbo:.4f}")
+    if vgr.pbo is None:
+        _out("PBO:           n/a (not evaluated — model-selection diagnostic)")
+    else:
+        _out(f"PBO:           {vgr.pbo:.4f}")
     if permutation_p is not None:
         _out(f"Permutation p: {permutation_p:.4f}")
     for gate_id, passed in vgr.gate_results.items():
@@ -176,7 +179,11 @@ async def _run(args: argparse.Namespace, cfg: AppConfig) -> int:
     df = _build_df(candles)
     strategy = strategy_cls()
     strategy_cfg = _load_strategy_config(args.strategy)
-    cost_model = load_cost_models().get(args.symbol)
+    try:
+        cost_model = get_cost_model(args.symbol)
+    except ConfigError as exc:
+        _err(f"ERROR: {exc}")
+        return 2
     wf_cfg = cfg.settings.backtest.walkforward
 
     wf = run_walkforward_harness(

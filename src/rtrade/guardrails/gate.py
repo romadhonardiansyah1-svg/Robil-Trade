@@ -73,15 +73,51 @@ def run_gate(
     # GR-11: citations
     sources: list[str] | None = None,
     pack_source_ids: set[str] | None = None,
+    # --- B6: caller-declared mandatory gates (fail CLOSED on missing input) ---
+    require: set[str] | None = None,
 ) -> GateResult:
     """Run all P1 guardrails on a SignalCandidate.
 
     Returns GateResult with passed=True only if ALL guardrails pass.
+
+    ``require`` (B6 / fail-closed): a set of gate IDs the CALLER declares MUST be
+    evaluated. Several gates only run when their input is provided (they are
+    wrapped in ``if x is not None``), so a caller that OMITS an input would
+    silently SKIP a safety gate — a fail-OPEN hole. For every gate id listed in
+    ``require`` whose backing input is missing/None, a ``GateFailure`` with
+    reason ``"required input missing — fail closed"`` is appended, turning
+    omission into a REJECTION with a full audit trail. When ``require is None``
+    (the default) behaviour is unchanged, preserving the no-LLM and crypto paths
+    plus existing callers/tests.
+
+    Requirable gate -> backing input mapping:
+        GR-06 -> ``latest_candle_ts`` (freshness; ``live_price`` is enforced
+                 separately by ``live_quote_required``)
+        GR-07 -> ``events`` AND ``related_currencies`` (news blackout)
+        GR-08 -> ``regime`` (regime gate)
+        GR-09 -> ``confidence`` (confidence floor)
+        GR-11 -> ``sources`` (citations)
+        GR-13 -> ``paper_outcomes`` (expectancy guard)
     """
     from rtrade.core.timeutil import utcnow
 
     failures: list[GateFailure] = []
     now_ts = ensure_utc(now) if now is not None else utcnow()
+
+    # --- B6: fail CLOSED when a CALLER-required gate's input is absent ---
+    if require:
+        missing_reason = "required input missing — fail closed"
+        required_input_present: dict[str, bool] = {
+            "GR-06": latest_candle_ts is not None,
+            "GR-07": events is not None and related_currencies is not None,
+            "GR-08": regime is not None,
+            "GR-09": confidence is not None,
+            "GR-11": sources is not None,
+            "GR-13": paper_outcomes is not None,
+        }
+        for gate_id in sorted(require):
+            if not required_input_present.get(gate_id, True):
+                failures.append(GateFailure(gate_id=gate_id, reason=missing_reason))
 
     # --- GR-01: Schema validity ---
     # Already guaranteed by Pydantic validation when creating SignalCandidate.

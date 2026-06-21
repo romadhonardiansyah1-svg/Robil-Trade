@@ -14,7 +14,7 @@ import structlog
 
 from rtrade.backtest.costs import CostModel
 from rtrade.backtest.engine import BacktestResult, run_backtest
-from rtrade.backtest.metrics import BacktestMetrics, compute_metrics
+from rtrade.backtest.metrics import BacktestMetrics, compute_metrics, trades_per_year_from_span
 from rtrade.backtest.permutation import permutation_pvalue
 from rtrade.backtest.smart_exit import SmartExitConfig
 from rtrade.backtest.validation import ValidationGateResult, run_validation_gates
@@ -108,7 +108,15 @@ def run_harness(
     signals = generate_signals(strategy, strategy_cfg, df)
     bt = run_backtest(df, signals, cost_model=cost_model, smart_exit=smart_exit)
     r = [t.r_multiple for t in bt.trades if t.r_multiple is not None]
-    metrics = compute_metrics(r, bt.equity_curve)
+    # A3: annualize the Sharpe by the actual trade frequency over the data span.
+    span_days = (
+        (pd.Timestamp(df.index[-1]) - pd.Timestamp(df.index[0])).total_seconds() / 86400.0
+        if len(df.index) >= 2
+        else 0.0
+    )
+    metrics = compute_metrics(
+        r, bt.equity_curve, trades_per_year=trades_per_year_from_span(len(r), span_days)
+    )
     perm_p = permutation_pvalue(r) if len(r) >= 5 else 1.0
     gates = run_validation_gates(metrics, n_trials, permutation_p=perm_p)
     return HarnessResult(
@@ -176,6 +184,10 @@ def run_walkforward_harness(
     all_oos_r: list[float] = []
     per_window: list[dict[str, Any]] = []
 
+    # A8: size warmup by the ACTUAL bar duration (robust to any timeframe), not
+    # by assuming 1 bar == 1 hour. Inferred once from the median index spacing.
+    bar_dur = pd.Series(df.index).diff().median() if len(df.index) >= 2 else pd.NaT
+
     for window in windows:
         # Get test period slice (with warmup from train end).
         train_end_ts = pd.Timestamp(window.train_end)
@@ -183,7 +195,11 @@ def run_walkforward_harness(
         test_end_ts = pd.Timestamp(window.test_end)
 
         # Include warmup bars before test start for indicator computation.
-        warmup_start = train_end_ts - pd.Timedelta(hours=warmup_bars)
+        # Fall back to the legacy hourly assumption if the duration is unknown.
+        if pd.isna(bar_dur):
+            warmup_start = train_end_ts - pd.Timedelta(hours=warmup_bars)
+        else:
+            warmup_start = train_end_ts - warmup_bars * bar_dur
         wf_df = df[(df.index >= warmup_start) & (df.index < test_end_ts)]
 
         if wf_df.empty or len(wf_df) < warmup_bars + 10:
@@ -193,7 +209,7 @@ def run_walkforward_harness(
         test_mask = wf_df.index >= test_start_ts
         if not test_mask.any():
             continue
-        first_test_iloc = int(test_mask.values.argmax())
+        first_test_iloc = int(test_mask.argmax())
 
         # Generate signals on the full wf_df (indicators warm from warmup).
         raw_signals = generate_signals(
@@ -219,7 +235,12 @@ def run_walkforward_harness(
         window_r = [t.r_multiple for t in bt.trades if t.r_multiple is not None]
         all_oos_r.extend(window_r)
 
-        window.test_metrics = compute_metrics(window_r, bt.equity_curve)
+        win_span_days = (test_end_ts - test_start_ts).total_seconds() / 86400.0
+        window.test_metrics = compute_metrics(
+            window_r,
+            bt.equity_curve,
+            trades_per_year=trades_per_year_from_span(len(window_r), win_span_days),
+        )
         per_window.append(
             {
                 "test_start": str(window.test_start.date()),
@@ -238,7 +259,16 @@ def run_walkforward_harness(
         eq += eq * 0.01 * r  # 1% risk per trade
         oos_equity.append(eq)
 
-    oos_metrics = compute_metrics(all_oos_r, oos_equity)
+    # A3: OOS span = total duration of all test windows actually traded.
+    oos_span_days = sum(
+        (pd.Timestamp(w.test_end) - pd.Timestamp(w.test_start)).total_seconds() / 86400.0
+        for w in windows
+    )
+    oos_metrics = compute_metrics(
+        all_oos_r,
+        oos_equity,
+        trades_per_year=trades_per_year_from_span(len(all_oos_r), oos_span_days),
+    )
     perm_p = permutation_pvalue(all_oos_r) if len(all_oos_r) >= 5 else 1.0
     oos_gates = run_validation_gates(oos_metrics, permutation_p=perm_p)
 

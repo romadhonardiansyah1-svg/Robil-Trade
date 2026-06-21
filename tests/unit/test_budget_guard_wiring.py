@@ -8,6 +8,11 @@ Verifies that ``run_llm_pipeline``:
       BudgetGuard is supplied (budget_guard=None), keeping all existing
       callers/tests unchanged. This is the dormant path (llm.enabled=false).
 
+It also covers B2 (persist + seed daily LLM budget across scans): the scan
+path's seed/persist helpers, backed by the Redis-keyed daily-cost store
+(``KeyManager``), make the USD/day cap accumulate across consecutive scans
+instead of resetting per scan.
+
 All LLM calls are mocked -- deterministic, no network.
 """
 
@@ -22,7 +27,9 @@ from rtrade.core.constants import Action, Timeframe
 from rtrade.llm.budget_guard import BudgetGuard
 from rtrade.llm.client import LLMClient
 from rtrade.llm.context_pack import ContextPack
+from rtrade.llm.key_manager import KeyManager
 from rtrade.llm.pipeline import PipelineDecision, run_llm_pipeline
+from rtrade.pipeline.scan import _persist_scan_spend, _seed_daily_spend
 from rtrade.signals.schemas import (
     AnalystAssessment,
     ConfluenceBreakdown,
@@ -265,3 +272,55 @@ class TestBudgetGuardWiring:
         assert result.decision == PipelineDecision.PUBLISH
         assert result.budget_stop is None
         assert result.llm_used
+
+
+def _daily_guard() -> BudgetGuard:
+    return BudgetGuard(
+        LLMBudgetSettings(
+            max_tokens_per_scan=1_000_000,
+            max_usd_per_day=1.0,
+            max_wall_seconds_per_scan=1_000.0,
+            max_steps_per_scan=1_000,
+        )
+    )
+
+
+class TestDailyBudgetSeedPersist:
+    """B2: USD/day cap binds ACROSS scans via seed + persist (UTC-date keyed)."""
+
+    @pytest.mark.asyncio
+    async def test_daily_budget_binds_across_two_scans(self) -> None:
+        # In-memory KeyManager (no Redis) -- exercises the graceful fallback path.
+        store = KeyManager(redis_client=None, daily_budget_usd=1.0)
+        guard = _daily_guard()
+
+        # --- Scan 1: spends 0.7, under the 1.0 cap. ---
+        seeded1 = await _seed_daily_spend(store)
+        assert seeded1 == 0.0
+        state1 = guard.start_scan(day_usd_seed=seeded1)
+        assert guard.record(state1, usd=0.7) is None
+        await _persist_scan_spend(store, state1.day_usd - seeded1)
+
+        # Persisted spend is now visible to the next scan.
+        assert await store.get_daily_cost() == pytest.approx(0.7)
+
+        # --- Scan 2: a fresh BudgetState would reset to 0; seeding carries 0.7. ---
+        seeded2 = await _seed_daily_spend(store)
+        assert seeded2 == pytest.approx(0.7)
+        state2 = guard.start_scan(day_usd_seed=seeded2)
+        assert state2.day_usd == pytest.approx(0.7)
+        # 0.7 (prior) + 0.5 (this scan) = 1.2 >= 1.0 -> cap binds ACROSS scans.
+        assert guard.record(state2, usd=0.5) == "usd_day"
+
+    @pytest.mark.asyncio
+    async def test_seed_and_persist_no_store_is_graceful(self) -> None:
+        # No store -> seed 0.0, persist is a no-op (no crash).
+        assert await _seed_daily_spend(None) == 0.0
+        await _persist_scan_spend(None, 0.5)
+
+    @pytest.mark.asyncio
+    async def test_persist_guards_negative_and_zero_delta(self) -> None:
+        store = KeyManager(redis_client=None, daily_budget_usd=1.0)
+        await _persist_scan_spend(store, -0.3)
+        await _persist_scan_spend(store, 0.0)
+        assert await store.get_daily_cost() == 0.0

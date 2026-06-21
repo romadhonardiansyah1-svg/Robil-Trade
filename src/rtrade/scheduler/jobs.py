@@ -12,8 +12,10 @@ duplicate signals (dedup key: instrument, timeframe, strategy, bar_ts).
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -22,6 +24,11 @@ from rtrade.core.errors import RateLimitExceeded
 from rtrade.monitoring.alerts import AlertLevel, AlertManager, AlertType
 from rtrade.monitoring.healthcheck import HealthChecker
 from rtrade.pipeline import run_scan, sync_calendar, track_paper_signals
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pandas as pd
 
 logger = structlog.get_logger(__name__)
 
@@ -170,18 +177,28 @@ async def health_check_job() -> None:
 
 
 async def hmm_train_job() -> None:
-    """Weekly HMM retrain per instrument (Sunday 02:00 UTC) (W8)."""
+    """Weekly HMM retrain per instrument (Sunday 02:00 UTC) (W8).
+
+    E2: candle data is loaded inside the DB session, then the session is
+    RELEASED before any CPU-bound work. The blocking training pipeline
+    (indicators -> HMM fit -> signed save) is offloaded to a thread executor via
+    ``run_in_executor`` so it never stalls the event loop shared by the scan,
+    paper-tracker and health-check jobs.
+    """
+    from pathlib import Path
+
     import pandas as pd
 
     from rtrade.core.constants import Timeframe
-    from rtrade.indicators.engine import compute as compute_indicators
     from rtrade.persistence.db import _get_engine, create_session_factory
     from rtrade.persistence.repositories import CandleRepo, InstrumentRepo
-    from rtrade.regime.hmm import HMMRegimeDetector
 
     cfg = AppConfig.load()
     engine = _get_engine(cfg.secrets.database_url)
     session_factory = create_session_factory(engine)
+
+    # Phase 1 — gather candles per instrument while the session is open.
+    pending: list[tuple[str, pd.DataFrame]] = []
     async with session_factory() as session:
         for inst in cfg.instruments:
             row = await InstrumentRepo(session).get_by_symbol(inst.symbol)
@@ -203,23 +220,51 @@ async def hmm_train_job() -> None:
                     for c in candles
                 ]
             )
-            df = compute_indicators(df)
-            detector = HMMRegimeDetector()
-            detector.train(df)
-            from pathlib import Path
+            pending.append((inst.symbol, df))
+    # Session released here — the CPU-bound training below must not hold it.
 
-            from rtrade.ml.model_io import save_model
+    if not pending:
+        return
 
-            out = Path("models")
-            out.mkdir(exist_ok=True)
-            save_model(detector, out / f"hmm_{inst.symbol}.joblib")
-            logger.info("hmm trained", symbol=inst.symbol)
+    out = Path("models")
+    out.mkdir(exist_ok=True)
+    loop = asyncio.get_running_loop()
+    for symbol, df in pending:
+        # Phase 2 — offload CPU-bound training off the event loop.
+        await loop.run_in_executor(
+            None, _train_hmm_blocking, df, symbol, cfg.secrets.model_hmac_key, out
+        )
+        logger.info("hmm trained", symbol=symbol)
+
+
+def _train_hmm_blocking(df: pd.DataFrame, symbol: str, hmac_key: str, out_dir: Path) -> None:
+    """CPU-bound HMM training pipeline (E2).
+
+    Runs in a thread-pool executor so it never blocks the event loop:
+    compute_indicators -> detector.train -> save_model (keyed-HMAC, C3). Takes a
+    plain DataFrame and primitives only — it never touches the DB session, which
+    the caller has already released.
+    """
+    from rtrade.indicators.engine import compute as compute_indicators
+    from rtrade.ml.model_io import save_model
+    from rtrade.regime.hmm import HMMRegimeDetector
+
+    df = compute_indicators(df)
+    detector = HMMRegimeDetector()
+    detector.train(df)
+    save_model(detector, out_dir / f"hmm_{symbol}.joblib", hmac_key=hmac_key)
 
 
 async def audit_chain_verify_job() -> None:
     """Periodic audit-chain integrity check (P2-8, S9).
 
-    Samples last 1000 audit rows, verifies hash chain. Alert on break.
+    Samples the LATEST 1000 audit rows and verifies the hash chain. Rows are
+    fetched by descending id (so recent rows are always covered even once the
+    table exceeds 1000 rows — D3), then reversed to ascending id so
+    ``verify_chain`` walks them in chain order. The window's first row has no
+    predecessor inside the window, so we anchor on its stored ``prev_hash``
+    (``anchor_first=True``); its content is still hash-verified and every later
+    row is fully chained. Alert on break.
     """
     from sqlalchemy import select
 
@@ -234,9 +279,11 @@ async def audit_chain_verify_job() -> None:
     try:
         async with session_factory() as session:
             result = await session.execute(
-                select(SignalAudit).order_by(SignalAudit.id.asc()).limit(1000)
+                select(SignalAudit).order_by(SignalAudit.id.desc()).limit(1000)
             )
-            rows = result.scalars().all()
+            # Latest rows come back newest-first; reverse to ascending id so the
+            # hash chain is walked in the order it was written.
+            rows = list(reversed(result.scalars().all()))
             entries = [
                 {
                     "stage": r.stage,
@@ -246,7 +293,7 @@ async def audit_chain_verify_job() -> None:
                 }
                 for r in rows
             ]
-        ok, count_or_idx = verify_chain(entries)
+        ok, count_or_idx = verify_chain(entries, anchor_first=True)
         if ok:
             logger.info("audit chain verify PASSED", rows_checked=count_or_idx)
         else:

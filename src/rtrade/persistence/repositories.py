@@ -7,17 +7,17 @@ Transaction control (commit/rollback) belongs to the caller.
 """
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from rtrade.core.constants import Timeframe
 from rtrade.core.errors import DataValidationError
-from rtrade.core.timeutil import ensure_utc
+from rtrade.core.timeutil import ensure_utc, utcnow
 from rtrade.persistence.models import (
     BacktestRun,
     CalendarSourceHealth,
@@ -73,10 +73,15 @@ class InstrumentRepo:
         pip_size: Decimal,
         config: dict[str, Any] | None = None,
     ) -> Instrument:
-        existing = await self.get_by_symbol(symbol)
-        if existing is not None:
-            return existing
-        instrument = Instrument(
+        """Race-safe get-or-create (D5: TOCTOU).
+
+        A single ``INSERT ... ON CONFLICT (symbol) DO NOTHING`` makes the write
+        atomic — concurrent writers no longer both see "missing" and collide on
+        the unique ``symbol``. The follow-up SELECT returns the existing or
+        newly-inserted row, preserving the returned-object contract (callers
+        rely on ``.id``). Transaction control stays with the caller.
+        """
+        stmt = pg_insert(Instrument).values(
             symbol=symbol,
             market=market,
             provider=provider,
@@ -84,8 +89,11 @@ class InstrumentRepo:
             pip_size=pip_size,
             config=config or {},
         )
-        self._session.add(instrument)
-        await self._session.flush()  # populate .id
+        stmt = stmt.on_conflict_do_nothing(index_elements=[Instrument.symbol])
+        await self._session.execute(stmt)
+        instrument = await self.get_by_symbol(symbol)
+        if instrument is None:  # pragma: no cover - unreachable after upsert
+            raise DataValidationError(f"instrument {symbol!r} missing after upsert")
         return instrument
 
     async def get_by_id(self, instrument_id: int) -> Instrument | None:
@@ -173,8 +181,41 @@ class EventRepo:
         self._session = session
 
     async def upsert_many(self, events: list[EconomicEvent]) -> int:
-        for event in events:
-            await self._session.merge(event)
+        """Idempotent bulk upsert keyed on the PK ``id`` (hash of
+        provider/event/time). One batched ``INSERT ... ON CONFLICT DO UPDATE``
+        replaces the former per-row ``merge`` loop (D5: N+1 write)."""
+        if not events:
+            return 0
+        stmt = pg_insert(EconomicEvent).values(
+            [
+                {
+                    "id": e.id,
+                    "event": e.event,
+                    "currency": e.currency,
+                    "impact": e.impact,
+                    "event_time": e.event_time,
+                    "actual": e.actual,
+                    "forecast": e.forecast,
+                    "previous": e.previous,
+                    "fetched_at": e.fetched_at,
+                }
+                for e in events
+            ]
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[EconomicEvent.id],
+            set_={
+                "event": stmt.excluded.event,
+                "currency": stmt.excluded.currency,
+                "impact": stmt.excluded.impact,
+                "event_time": stmt.excluded.event_time,
+                "actual": stmt.excluded.actual,
+                "forecast": stmt.excluded.forecast,
+                "previous": stmt.excluded.previous,
+                "fetched_at": stmt.excluded.fetched_at,
+            },
+        )
+        await self._session.execute(stmt)
         return len(events)
 
     async def get_window(self, start: datetime, end: datetime) -> list[EconomicEvent]:
@@ -363,6 +404,14 @@ class SignalRepo:
 
 
 class AuditRepo:
+    # D1: transaction-scoped advisory-lock key that serializes hash-chain
+    # appends. The constant is the ASCII bytes of "RTRA" (0x52='R', 0x54='T',
+    # 0x52='R', 0x41='A') read as a signed 32-bit int — a small, fixed,
+    # documented value dedicated to the rtrade audit chain. pg_advisory_xact_lock
+    # accepts a bigint, so this is well within range and collision-free for our
+    # single use.
+    _CHAIN_LOCK_KEY = 0x52545241
+
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -374,8 +423,24 @@ class AuditRepo:
         detail: dict[str, Any],
         signal_id: str | None = None,
     ) -> None:
-        # S9: hash chain — get prev_hash from last audit row
+        # S9: hash chain — get prev_hash from last audit row.
         from rtrade.persistence.audit_chain import build_chain_entry
+
+        # D1: serialize chain appends. Take a Postgres transaction-scoped
+        # advisory lock BEFORE the read-then-insert so only one appender runs
+        # the read→insert critical section at a time. The lock auto-releases at
+        # COMMIT/ROLLBACK, so it is held for the remainder of the caller's
+        # transaction — correct because the INSERT must be committed before the
+        # lock releases for the next appender to observe the new chain head.
+        # This relies on the caller's read+insert+COMMIT occurring in the same
+        # transaction (the commit boundary is what makes the serialization
+        # correct). Without the lock, concurrent tasks sharing the event loop
+        # and DB could read the SAME latest row and chain two rows off the same
+        # prev_hash, forking the chain.
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": self._CHAIN_LOCK_KEY},
+        )
 
         prev_hash = "genesis"
         last = await self._session.execute(
@@ -387,8 +452,11 @@ class AuditRepo:
             prev_hash = chain.get("row_hash", "genesis")
 
         chain_entry = build_chain_entry(prev_hash, stage, ok, signal_id, detail)
-        detail["_chain"] = chain_entry
-        self._session.add(SignalAudit(signal_id=signal_id, stage=stage, ok=ok, detail=detail))
+        # D5 (Low): build the stored dict without mutating the caller's input.
+        stored_detail = {**detail, "_chain": chain_entry}
+        self._session.add(
+            SignalAudit(signal_id=signal_id, stage=stage, ok=ok, detail=stored_detail)
+        )
 
 
 class StrategyStateRepo:
@@ -400,22 +468,28 @@ class StrategyStateRepo:
         return True if row is None else bool(row.enabled)
 
     async def set_state(self, strategy: str, *, enabled: bool, reason: str | None = None) -> None:
-        from rtrade.core.timeutil import utcnow
+        """Atomic upsert of strategy enablement (D5: TOCTOU).
 
-        row = await self._session.get(StrategyState, strategy)
-        if row is None:
-            self._session.add(
-                StrategyState(
-                    strategy=strategy,
-                    enabled=enabled,
-                    disabled_reason=reason,
-                    updated_at=utcnow(),
-                )
-            )
-        else:
-            row.enabled = enabled
-            row.disabled_reason = reason
-            row.updated_at = utcnow()
+        Replaces the former get-then-add/update with a single
+        ``INSERT ... ON CONFLICT (strategy) DO UPDATE`` so concurrent toggles
+        converge to one row without an ``IntegrityError`` race.
+        """
+        now = utcnow()
+        stmt = pg_insert(StrategyState).values(
+            strategy=strategy,
+            enabled=enabled,
+            disabled_reason=reason,
+            updated_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[StrategyState.strategy],
+            set_={
+                "enabled": stmt.excluded.enabled,
+                "disabled_reason": stmt.excluded.disabled_reason,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        await self._session.execute(stmt)
 
 
 class CalendarSourceHealthRepo:
@@ -433,17 +507,32 @@ class CalendarSourceHealthRepo:
         consecutive_failures: int,
         last_attempt: datetime | None,
     ) -> None:
-        existing = await self._session.get(CalendarSourceHealth, source)
-        if existing is None:
-            existing = CalendarSourceHealth(source=source)
-            self._session.add(existing)
-        existing.last_success = last_success
-        existing.last_error = last_error
-        existing.consecutive_failures = consecutive_failures
-        existing.last_attempt = last_attempt
-        # Refresh updated_at deterministically on both insert and update paths
-        # (model has server_default but no onupdate; keep it testable).
-        existing.updated_at = datetime.now(UTC)
+        """Atomic per-source health upsert (D5: TOCTOU).
+
+        Replaces the former get-then-modify with a single
+        ``INSERT ... ON CONFLICT (source) DO UPDATE``. ``updated_at`` is set
+        deterministically on both insert and update paths (the model has a
+        server_default but no onupdate; keep it testable).
+        """
+        stmt = pg_insert(CalendarSourceHealth).values(
+            source=source,
+            last_success=last_success,
+            last_error=last_error,
+            consecutive_failures=consecutive_failures,
+            last_attempt=last_attempt,
+            updated_at=utcnow(),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[CalendarSourceHealth.source],
+            set_={
+                "last_success": stmt.excluded.last_success,
+                "last_error": stmt.excluded.last_error,
+                "consecutive_failures": stmt.excluded.consecutive_failures,
+                "last_attempt": stmt.excluded.last_attempt,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        await self._session.execute(stmt)
 
     async def all(self) -> list[CalendarSourceHealth]:
         result = await self._session.execute(select(CalendarSourceHealth))

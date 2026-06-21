@@ -15,7 +15,7 @@ import pandas as pd
 
 from rtrade.backtest.costs import CostModel
 from rtrade.backtest.engine import run_backtest
-from rtrade.backtest.metrics import BacktestMetrics, compute_metrics
+from rtrade.backtest.metrics import BacktestMetrics, compute_metrics, trades_per_year_from_span
 
 
 @dataclass
@@ -159,10 +159,25 @@ def run_walk_forward(
         all_oos_equity.extend(result.equity_curve[1:])
 
         # Store window metrics.
-        window.test_metrics = compute_metrics(test_r, result.equity_curve)
+        win_span_days = (
+            pd.Timestamp(window.test_end) - pd.Timestamp(window.test_start)
+        ).total_seconds() / 86400.0
+        window.test_metrics = compute_metrics(
+            test_r,
+            result.equity_curve,
+            trades_per_year=trades_per_year_from_span(len(test_r), win_span_days),
+        )
 
     # Compute aggregate OOS metrics.
-    oos_metrics = compute_metrics(all_oos_r, all_oos_equity)
+    oos_span_days = sum(
+        (pd.Timestamp(w.test_end) - pd.Timestamp(w.test_start)).total_seconds() / 86400.0
+        for w in windows
+    )
+    oos_metrics = compute_metrics(
+        all_oos_r,
+        all_oos_equity,
+        trades_per_year=trades_per_year_from_span(len(all_oos_r), oos_span_days),
+    )
 
     return WalkForwardResult(
         windows=windows,

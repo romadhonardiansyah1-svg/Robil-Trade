@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+# Least-privilege default: GITHUB_TOKEN is read-only. Lint/type/test need no
+# write scopes; grant more per-job only if a future step requires it.
+permissions:
+  contents: read
+
 jobs:
   ci:
     runs-on: ubuntu-latest

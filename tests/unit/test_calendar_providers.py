@@ -168,6 +168,63 @@ async def test_composite_all_fail_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_composite_fails_over_on_empty_source() -> None:
+    """B1: a source returning [] (no error) must NOT win; a later non-empty source does."""
+    primary = _FakeCalendarProvider(events=[])  # empty, no error (e.g. schema drift)
+    fallback = _FakeCalendarProvider(events=[_make_event("FOMC")])
+    composite = CompositeCalendarProvider(
+        [primary, fallback],
+        names=["primary", "fallback"],  # type: ignore[list-item]
+    )
+    events = await composite.fetch_events(date(2026, 7, 1), date(2026, 7, 31))
+    assert len(events) == 1
+    assert events[0].event == "FOMC"
+    # The non-empty source is recorded as the verified success.
+    assert composite.active_tier() == "fallback"
+    health = composite.health_snapshot()
+    assert health["fallback"].last_success is not None
+    # The empty source must NOT be recorded as a verified (non-empty) success.
+    assert health["primary"].last_success is None
+
+
+@pytest.mark.asyncio
+async def test_composite_all_empty_no_false_fresh() -> None:
+    """B1: all sources empty (no error) → return [], loud alert, freshness NOT advanced."""
+    primary = _FakeCalendarProvider(events=[])
+    fallback = _FakeCalendarProvider(events=[])
+    alerts: list[str] = []
+
+    async def _capture_alert(msg: str) -> None:
+        alerts.append(msg)
+
+    composite = CompositeCalendarProvider(
+        [primary, fallback],
+        names=["primary", "fallback"],  # type: ignore[list-item]
+        alert_callback=_capture_alert,
+    )
+    events = await composite.fetch_events(date(2026, 7, 1), date(2026, 7, 31))
+    assert events == []
+    # A loud all-empty alert must be emitted.
+    assert any("EMPTY" in m.upper() for m in alerts)
+    # Verified freshness must NOT advance on an all-empty cycle (fail-safe).
+    assert composite.freshest_nonempty_success() is None
+    assert composite.freshest_last_success() is None
+    await composite.close()
+
+
+@pytest.mark.asyncio
+async def test_composite_all_empty_does_not_raise() -> None:
+    """All-empty (no error) is a valid (fail-safe) result, not a crash."""
+    composite = CompositeCalendarProvider(
+        [_FakeCalendarProvider(events=[]), _FakeCalendarProvider(events=[])],
+        names=["primary", "fallback"],  # type: ignore[list-item]
+    )
+    events = await composite.fetch_events(date(2026, 7, 1), date(2026, 7, 31))
+    assert events == []
+    await composite.close()
+
+
+@pytest.mark.asyncio
 async def test_composite_health_snapshot() -> None:
     primary = _FakeCalendarProvider(events=[_make_event()])
     composite = CompositeCalendarProvider(

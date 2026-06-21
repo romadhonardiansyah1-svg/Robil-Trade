@@ -108,8 +108,14 @@ class CompositeMarketDataProvider(MarketDataProvider):
         return result
 
     async def fetch_spread(self, symbol: str) -> float | None:
-        for _name, provider in self._ordered_legs():
-            spread = await provider.fetch_spread(symbol)
+        for name, provider in self._ordered_legs():
+            try:
+                spread = await provider.fetch_spread(symbol)
+            except Exception as exc:  # one leg's failure must not abort the lookup
+                logger.warning(
+                    "market leg spread failed", leg=name, op="fetch_spread", error=str(exc)
+                )
+                continue
             if spread is not None:
                 return spread
         return None

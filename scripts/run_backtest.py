@@ -17,16 +17,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pandas as pd
 import structlog
 
-from rtrade.backtest.costs import load_cost_models
+from rtrade.backtest.costs import get_cost_model
 from rtrade.backtest.harness import (
     HarnessResult,
     WalkForwardHarnessResult,
@@ -36,6 +36,7 @@ from rtrade.backtest.harness import (
 from rtrade.backtest.smart_exit import SmartExitConfig
 from rtrade.core.config import AppConfig
 from rtrade.core.constants import Timeframe
+from rtrade.core.errors import ConfigError
 from rtrade.indicators.engine import compute as compute_indicators
 from rtrade.persistence.db import create_engine, create_session_factory
 from rtrade.persistence.repositories import CandleRepo, InstrumentRepo
@@ -233,6 +234,12 @@ def main() -> None:
         "--report", action="store_true", default=True, help="Generate markdown report"
     )
     parser.add_argument("--output-dir", type=str, default="reports", help="Output directory")
+    parser.add_argument(
+        "--allow-zero-cost",
+        action="store_true",
+        default=False,
+        help="Allow running with no cost model (NOT a valid decision basis)",
+    )
     args = parser.parse_args()
 
     cfg = AppConfig.load()
@@ -240,11 +247,17 @@ def main() -> None:
     strategy = strategy_cls()
     strategy_cfg = _load_strategy_cfg(args.strategy)
 
-    # Load cost model.
-    cost_models = load_cost_models()
-    cost_model = cost_models.get(args.instrument)
+    # Load cost model — refuse cost-free runs unless explicitly opted in.
+    try:
+        cost_model = get_cost_model(args.instrument, allow_missing=args.allow_zero_cost)
+    except ConfigError as exc:
+        logger.error("refusing cost-free backtest", instrument=args.instrument, error=str(exc))
+        sys.exit(1)
     if cost_model is None:
-        logger.warning("no cost model found — using zero costs", instrument=args.instrument)
+        logger.warning(
+            "RUNNING COST-FREE — results are NOT a valid decision basis",
+            instrument=args.instrument,
+        )
 
     # Load candles from DB.
     logger.info("loading candles from DB", instrument=args.instrument)

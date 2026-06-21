@@ -8,6 +8,7 @@ import time
 import httpx
 import pytest
 import respx
+import structlog
 
 from rtrade.llm.auth.oauth2 import OAuth2Provider, generate_pkce_pair
 from rtrade.llm.auth.token_store import StoredToken, load_token, save_token
@@ -149,3 +150,117 @@ class TestNoTokenRaisesError:
         prov = _make_provider(grant_type="device_code")
         with pytest.raises(RuntimeError, match="rtrade auth login"):
             await prov.resolve()
+
+
+# C2: OAuth token bodies must never reach logs or exception messages.
+ACCESS_SENTINEL = "SENTINEL_ACCESS"
+REFRESH_SENTINEL = "SENTINEL_REFRESH"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+
+
+def _mock_codex_device_init() -> None:
+    """Codex-style device-init: triggers the 2-step authorization_code exchange."""
+    respx.post(DEVICE_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"device_auth_id": "dev-123", "user_code": "WXYZ", "interval": 0},
+        )
+    )
+    # First poll returns an authorization_code → forces the token-exchange path.
+    respx.post(TOKEN_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={"authorization_code": "AUTHCODE", "code_verifier": "VERIF"},
+        )
+    )
+
+
+class TestTokenExchangeNoLeak:
+    """C2: token-exchange must not leak token bodies to logs or exceptions."""
+
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_token_exchange_does_not_log_token_values(self) -> None:
+        _mock_codex_device_init()
+        respx.post(CODEX_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": ACCESS_SENTINEL,
+                    "refresh_token": REFRESH_SENTINEL,
+                    "expires_in": 3600,
+                    "token_type": "Bearer",
+                    "scope": "read",
+                },
+            )
+        )
+        prov = _make_provider(grant_type="device_code")
+        with structlog.testing.capture_logs() as logs:
+            tok = await prov.device_login()
+
+        # Behavior preserved: caller still receives the real tokens.
+        assert tok.access_token == ACCESS_SENTINEL
+        assert tok.refresh_token == REFRESH_SENTINEL
+
+        # No emitted log record may contain the access or refresh token.
+        blob = repr(logs)
+        assert ACCESS_SENTINEL not in blob
+        assert REFRESH_SENTINEL not in blob
+
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_failed_exchange_error_message_omits_body(self) -> None:
+        _mock_codex_device_init()
+        respx.post(CODEX_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "error": "invalid_grant",
+                    "leaked_access": ACCESS_SENTINEL,
+                    "leaked_refresh": REFRESH_SENTINEL,
+                },
+            )
+        )
+        prov = _make_provider(grant_type="device_code")
+        with structlog.testing.capture_logs() as logs, pytest.raises(RuntimeError) as excinfo:
+            await prov.device_login()
+
+        msg = str(excinfo.value)
+        assert ACCESS_SENTINEL not in msg
+        assert REFRESH_SENTINEL not in msg
+        # And the failed body must not have been logged either.
+        blob = repr(logs)
+        assert ACCESS_SENTINEL not in blob
+        assert REFRESH_SENTINEL not in blob
+
+
+# C7: device-code poll loop must be bounded by expires_in + a max-iteration cap.
+class TestDeviceLoginBounded:
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_device_login_times_out_when_never_authorized(self) -> None:
+        """RFC 8628 poll that never returns a token must raise a timeout RuntimeError,
+        not loop forever."""
+        respx.post(DEVICE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "device_code": "dev-code-123",
+                    "user_code": "WXYZ",
+                    "verification_uri": "https://example.com/device",
+                    "interval": 0,
+                    "expires_in": 1,
+                },
+            )
+        )
+        poll_route = respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"error": "authorization_pending"})
+        )
+
+        prov = _make_provider(grant_type="device_code")
+        with pytest.raises(RuntimeError, match=r"(?i)timeout|expired|max"):
+            await prov.device_login()
+
+        # Must have polled a bounded number of times — proof it did not hang forever.
+        assert poll_route.call_count >= 1
+        assert poll_route.call_count < 100_000

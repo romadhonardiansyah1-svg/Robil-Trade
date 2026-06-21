@@ -23,7 +23,15 @@ def permutation_pvalue(
         seed: RNG seed for reproducibility.
 
     Returns:
-        p-value (0..1). Lower is better (strategy has real edge).
+        p-value in (0, 1]. Lower is better (strategy has real edge).
+
+    Note:
+        Uses the standard small-sample correction ``(count_ge + 1) /
+        (n_permutations + 1)`` (Davison & Hinkley 1997; North et al. 2002).
+        Adding the observed statistic itself to the permutation null guarantees
+        the p-value is strictly positive — an exact ``0`` is statistically
+        invalid (it would claim zero probability of seeing the result by
+        chance, which the finite Monte-Carlo sample cannot establish).
     """
     if len(r_multiples) < 5:
         return 1.0  # not enough data
@@ -42,4 +50,6 @@ def permutation_pvalue(
         if perm_mean >= actual_mean:
             count_ge += 1
 
-    return count_ge / n_permutations
+    # Small-sample correction: include the observed statistic in the null so
+    # the p-value is strictly positive (never an invalid exact 0).
+    return (count_ge + 1) / (n_permutations + 1)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+import time
 
 import pytest
 
@@ -164,6 +166,52 @@ class TestHealthCheckerDisk:
         assert "free_gb" in result.details
 
 
+class TestHealthCheckerTimeouts:
+    """E6: DB/Redis connectivity probes must be bounded by a timeout.
+
+    A hung backend must not make the healthcheck hang indefinitely — each
+    probe must fail fast (within ~the configured timeout) and report UNHEALTHY.
+    """
+
+    @pytest.mark.asyncio
+    async def test_database_probe_bounded_by_timeout(self) -> None:
+        checker = HealthChecker(db_url="postgresql://unused", timeout_s=0.1)
+
+        async def _hang() -> str | None:
+            await asyncio.sleep(10)
+            return "never"
+
+        # Replace the real connection probe with one that hangs.
+        checker._probe_database = _hang  # type: ignore[method-assign]
+
+        start = time.monotonic()
+        result = await checker.check_database()
+        elapsed = time.monotonic() - start
+
+        assert result.name == "database"
+        assert result.status == HealthStatus.UNHEALTHY
+        # Must be bounded by the timeout, not the 10s sleep.
+        assert elapsed < 2.0, f"check_database hung for {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_redis_probe_bounded_by_timeout(self) -> None:
+        checker = HealthChecker(redis_url="redis://unused", timeout_s=0.1)
+
+        async def _hang() -> tuple[bool, str]:
+            await asyncio.sleep(10)
+            return True, "never"
+
+        checker._probe_redis = _hang  # type: ignore[method-assign]
+
+        start = time.monotonic()
+        result = await checker.check_redis()
+        elapsed = time.monotonic() - start
+
+        assert result.name == "redis"
+        assert result.status == HealthStatus.UNHEALTHY
+        assert elapsed < 2.0, f"check_redis hung for {elapsed:.2f}s"
+
+
 class TestHealthCheckerLitellmOptional:
     """D2: litellm check is optional — skip when URL empty, DEGRADED when unreachable."""
 
@@ -182,3 +230,68 @@ class TestHealthCheckerLitellmOptional:
         assert result is not None
         assert result.name == "litellm"
         assert result.status == HealthStatus.DEGRADED
+
+
+# ============================================================================
+# E3: alert delivery robust to arbitrary Markdown-special content
+# ============================================================================
+
+
+class TestTelegramRobustToMarkdownSpecials:
+    """Dynamic content with Markdown specials must never break Telegram parsing.
+
+    Fix chose plain text (parse_mode=None) so no content can produce a 400 and
+    silently drop the alert.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_telegram_payload_disables_markdown_parsing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class _Resp:
+            status_code = 200
+            text = "ok"
+
+        class _Client:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+            async def post(self, url: str, json: dict[str, object]) -> _Resp:
+                captured["payload"] = json
+                return _Resp()
+
+        monkeypatch.setattr("rtrade.monitoring.alerts.httpx.AsyncClient", _Client)
+
+        mgr = AlertManager("token", "chat_id", enabled=True)
+        text = mgr._format_alert(
+            AlertLevel.WARNING,
+            "Title _x_ *y* [z](",
+            "err _x_ *y* [z](`backtick`",
+            details={"key_a": "a*b_c[d]("},
+        )
+        ok = await mgr._send_telegram(text)
+
+        assert ok is True
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        assert payload["parse_mode"] is None
+
+    def test_format_alert_does_not_emit_literal_markdown_markers(self) -> None:
+        """In plain-text mode the structural template must not show '*' markers."""
+        mgr = AlertManager("token", "chat_id", enabled=False)
+        text = mgr._format_alert(
+            AlertLevel.WARNING,
+            "Provider Down",
+            "boom",
+        )
+        assert "*" not in text
+        assert "ROBIL TRADE ALERT" in text
+        assert "Provider Down" in text

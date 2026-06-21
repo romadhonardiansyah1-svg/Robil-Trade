@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import random
 from datetime import UTC, datetime
+import os
 from pathlib import Path
+import random
+import sys
 from typing import Any
 
 import structlog
@@ -330,7 +332,16 @@ async def run_eval(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hallucination evaluation (PLAN 8.9.6)")
-    parser.add_argument("--api-key", required=True, help="Gemini API key")
+    parser.add_argument(
+        "--api-key-env",
+        default="GEMINI_API_KEY_1",
+        help=(
+            "Name of the environment variable holding the LLM API key "
+            "(default: GEMINI_API_KEY_1). The key is read from the environment, "
+            "never passed on the command line, to avoid leaking it via process "
+            "listings or shell history."
+        ),
+    )
     parser.add_argument(
         "--model",
         default="gemini/gemini-3.1-flash-lite",
@@ -340,7 +351,15 @@ def main() -> None:
     parser.add_argument("--traps", type=int, default=10, help="Trap pack count")
     args = parser.parse_args()
 
-    asyncio.run(run_eval(args.api_key, args.model, args.normal, args.traps))
+    api_key = os.environ.get(args.api_key_env)
+    if not api_key:
+        logger.error(
+            "API key environment variable not set",
+            env_var=args.api_key_env,
+        )
+        sys.exit(1)
+
+    asyncio.run(run_eval(api_key, args.model, args.normal, args.traps))
 
 
 if __name__ == "__main__":

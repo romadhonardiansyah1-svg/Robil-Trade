@@ -5,6 +5,8 @@ S1: disable docs/openapi in prod, add security headers middleware.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import os
 
 from fastapi import FastAPI
@@ -12,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
 from rtrade.delivery.api.routes import router
+from rtrade.persistence.db import shutdown_process_resources
 
 
 class _SecurityHeaders(BaseHTTPMiddleware):
@@ -24,6 +27,18 @@ class _SecurityHeaders(BaseHTTPMiddleware):
         resp.headers["Referrer-Policy"] = "no-referrer"
         resp.headers["Cache-Control"] = "no-store"
         return resp
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """E1: dispose the shared loop-aware engine(s) once, on app shutdown.
+
+    Handlers reuse a single process-scoped engine (``db._get_engine``) for the
+    process lifetime; disposing it here is the *only* place a request-path
+    engine is torn down (never inside a handler).
+    """
+    yield
+    await shutdown_process_resources()
 
 
 def create_app() -> FastAPI:
@@ -39,6 +54,7 @@ def create_app() -> FastAPI:
         docs_url=None if is_prod else "/docs",
         redoc_url=None,
         openapi_url=None if is_prod else "/openapi.json",
+        lifespan=_lifespan,
     )
     app.add_middleware(_SecurityHeaders)
     app.include_router(router)

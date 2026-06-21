@@ -29,3 +29,17 @@ def test_insufficient_data() -> None:
     """Less than 5 trades returns 1.0."""
     p = permutation_pvalue([1.0, 2.0])
     assert p == 1.0
+
+
+def test_pvalue_never_exactly_zero() -> None:
+    """A11: a perfect edge beating ALL permutations yields (0+1)/(n+1), not 0.
+
+    With all +2R the actual mean is the maximum possible sign-flip mean, so no
+    permutation strictly exceeds it; the small-sample correction floors the
+    p-value at 1/(n_permutations+1) instead of an invalid exact 0.
+    """
+    r = [2.0] * 30
+    n_perm = 1000
+    p = permutation_pvalue(r, n_permutations=n_perm, seed=42)
+    assert p == 1 / (n_perm + 1)
+    assert p > 0.0

@@ -51,3 +51,57 @@ class TestRedactProcessor:
         assert result["refresh_token"] == "***REDACTED***"
         assert result["password"] == "***REDACTED***"
         assert result["event"] == "normal"
+
+
+class TestRecursiveRedaction:
+    def test_nested_dict_secret_redacted(self) -> None:
+        result = redact_processor(
+            None,
+            "",
+            {
+                "outer": {
+                    "api_key": "SECRET",
+                    "url": "https://x?token=ABC&api_key=DEF",
+                }
+            },
+        )
+        blob = repr(result)
+        assert "SECRET" not in blob
+        assert "ABC" not in blob
+        assert "DEF" not in blob
+
+    def test_nested_list_secret_redacted(self) -> None:
+        result = redact_processor(
+            None,
+            "",
+            {"items": [{"access_token": "TOKVAL"}, "https://x?refresh_token=RTOK"]},
+        )
+        blob = repr(result)
+        assert "TOKVAL" not in blob
+        assert "RTOK" not in blob
+
+    def test_non_sensitive_nested_values_preserved(self) -> None:
+        result = redact_processor(
+            None,
+            "",
+            {"outer": {"event": "Nonfarm Payrolls", "count": 42, "nested": {"k": "v"}}},
+        )
+        assert result["outer"]["event"] == "Nonfarm Payrolls"
+        assert result["outer"]["count"] == 42
+        assert result["outer"]["nested"]["k"] == "v"
+
+    def test_url_token_variants_redacted(self) -> None:
+        result = redact_processor(
+            None,
+            "",
+            {
+                "msg": (
+                    "https://x?token=AAA&api_key=BBB&apikey=CCC"
+                    "&access_token=DDD&refresh_token=EEE&keep=ok"
+                )
+            },
+        )
+        msg = result["msg"]
+        for leaked in ("AAA", "BBB", "CCC", "DDD", "EEE"):
+            assert leaked not in msg
+        assert "keep=ok" in msg

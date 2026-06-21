@@ -11,6 +11,7 @@ def _make_metrics(**overrides: object) -> BacktestMetrics:
         "expectancy": 0.5,
         "profit_factor": 1.6,
         "sharpe_ratio": 1.2,
+        "sharpe_per_trade": 0.3,
         "max_drawdown_pct": 15.0,
         "avg_win_r": 2.0,
         "avg_loss_r": 1.0,

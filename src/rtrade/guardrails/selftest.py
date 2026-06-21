@@ -208,6 +208,51 @@ def run_guardrail_selftest() -> list[str]:
     if result.passed:
         problems.append("GR-13: negative expectancy was NOT rejected")
 
+    # --- B6: required-but-missing input fails CLOSED (not silently skipped) ---
+    # When a gate id is declared in `require` but its backing input is omitted,
+    # run_gate MUST reject (the fail-OPEN hole this self-test could not catch
+    # before). Cover each requirable gate.
+    require_cases: list[tuple[str, dict[str, object]]] = [
+        ("GR-06", {"require": {"GR-06"}}),  # no latest_candle_ts
+        ("GR-07", {"require": {"GR-07"}}),  # no events / related_currencies
+        ("GR-08", {"require": {"GR-08"}}),  # no regime
+        ("GR-09", {"require": {"GR-09"}}),  # no confidence
+        ("GR-11", {"require": {"GR-11"}}),  # no sources
+        ("GR-13", {"require": {"GR-13"}}),  # no paper_outcomes
+    ]
+    for gate_id, kwargs in require_cases:
+        result = run_gate(good, **kwargs)  # type: ignore[arg-type]
+        if result.passed:
+            problems.append(f"{gate_id}: required-but-missing input was NOT rejected (fail-OPEN)")
+        elif not any(
+            f.gate_id == gate_id and "required input missing" in f.reason for f in result.failures
+        ):
+            problems.append(f"{gate_id}: rejected but without a 'required input missing' failure")
+
+    # --- B6 regression: requiring gates whose inputs ARE present still passes ---
+    # Mirrors the production scan.py require set (non-crypto + LLM) with all
+    # inputs supplied: must not introduce any missing-input failure.
+    result = run_gate(
+        good,
+        latest_candle_ts=datetime.now(UTC),
+        timeframe=Timeframe.H1,
+        regime=Regime.TREND,
+        required_regime=Regime.TREND,
+        events=[],
+        related_currencies=["USD"],
+        confidence=0.80,
+        confidence_min=0.55,
+        sources=["deterministic_pipeline"],
+        paper_outcomes=[],
+        now=datetime.now(UTC),
+        require={"GR-06", "GR-07", "GR-08", "GR-09", "GR-11", "GR-13"},
+    )
+    if not result.passed:
+        problems.append(
+            "REGRESSION: valid candidate with full require set rejected: "
+            f"{[f.reason for f in result.failures]}"
+        )
+
     # --- Regression check: GOOD candidate passes ---
     result = run_gate(good)
     if not result.passed:

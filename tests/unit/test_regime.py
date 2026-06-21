@@ -1,6 +1,6 @@
 """Unit tests for regime classifier (PLAN §8.3)."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -102,3 +102,29 @@ class TestRegimeClassifier:
         clf.classify("XAUUSD", df)
         clf.reset("XAUUSD")
         assert clf.get_previous("XAUUSD") is None
+
+    def test_since_is_tz_aware_with_naive_index(self) -> None:
+        """B7: a tz-NAIVE df index with now=None must still yield a tz-aware UTC `since`.
+
+        Previously `pd.Timestamp(df.index[-1]).to_pydatetime()` flowed a NAIVE
+        datetime straight into RegimeState.since (golden-rule UTC violation).
+        """
+        clf = RegimeClassifier()
+        df = _make_indicator_df(adx=30.0)
+        # Strip the timezone to simulate a tz-naive index (e.g. backtest data).
+        df.index = df.index.tz_localize(None)
+        assert df.index.tz is None  # precondition: naive index
+
+        state = clf.classify("XAUUSD", df)
+
+        assert state.since.tzinfo is not None
+        assert state.since.utcoffset() == timedelta(0)  # UTC
+
+    def test_since_uses_aware_now_in_utc(self) -> None:
+        """B7: an explicit tz-aware `now` is normalized to UTC on `since`."""
+        clf = RegimeClassifier()
+        df = _make_indicator_df(adx=30.0)
+        now = datetime(2026, 3, 1, 9, 30, tzinfo=UTC)
+        state = clf.classify("XAUUSD", df, now=now)
+        assert state.since == now
+        assert state.since.tzinfo is not None

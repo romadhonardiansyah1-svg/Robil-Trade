@@ -17,11 +17,12 @@ S1 only active in TREND; S2 only in RANGE.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pandas as pd
 
 from rtrade.core.constants import Regime
+from rtrade.core.timeutil import ensure_utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +95,7 @@ class RegimeClassifier:
                 returns = close.pct_change(lookback_bars).dropna().iloc[-90:]
                 return_stdev = float(returns.std() * 100)
 
-        ts = now or pd.Timestamp(df.index[-1]).to_pydatetime()
+        ts = ensure_utc(now) if now is not None else self._fresh_index_ts(df.index[-1])
 
         # --- CRISIS check ---
         is_crisis = atr_pct >= self._crisis_atr_pct
@@ -139,6 +140,21 @@ class RegimeClassifier:
     def get_previous(self, symbol: str) -> RegimeState | None:
         """Get the last classified regime for an instrument."""
         return self._prev.get(symbol)
+
+    @staticmethod
+    def _fresh_index_ts(index_value: object) -> datetime:
+        """Normalize the latest df-index value to a tz-aware UTC datetime.
+
+        `ensure_utc` deliberately REJECTS naive datetimes, but a tz-naive index
+        is a legitimate input here (e.g. backtest frames). For that case we
+        explicitly assume UTC — the canonical timezone for all candle data — so
+        `RegimeState.since` never escapes as a naive datetime (golden-rule UTC).
+        A tz-aware index is converted to UTC via the canonical normalizer.
+        """
+        dt: datetime = pd.Timestamp(index_value).to_pydatetime()
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return ensure_utc(dt)
 
     def reset(self, symbol: str | None = None) -> None:
         """Reset state (for testing or instrument removal)."""

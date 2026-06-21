@@ -3,9 +3,10 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import structlog
 
 from rtrade.risk.limits import check_daily_limit, check_expectancy_guard
-from rtrade.risk.news_filter import check_news_blackout
+from rtrade.risk.news_filter import _parse_event_time, check_news_blackout
 from rtrade.risk.sizing import (
     compute_kelly_fraction,
     compute_position_size,
@@ -211,6 +212,49 @@ class TestNewsFilter:
         blocked, _ = check_news_blackout(events, ["USD"], now)
         # FOMC is always-high regardless of provider impact rating
         assert blocked
+
+    def test_naive_event_time_string_warns_and_returns_utc(self) -> None:
+        """B5: a NAIVE event_time string is assumed UTC but emits a LOUD warning."""
+        with structlog.testing.capture_logs() as logs:
+            parsed = _parse_event_time("2026-07-01T12:00:00", event_name="CPI")
+
+        assert parsed is not None
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() == timedelta(0)  # UTC
+        warnings = [r for r in logs if r.get("log_level") == "warning"]
+        assert any("naive" in str(r.get("event", "")).lower() for r in warnings)
+
+    def test_aware_event_time_string_does_not_warn(self) -> None:
+        """B5: a tz-aware event_time string is normalized silently (no warning)."""
+        with structlog.testing.capture_logs() as logs:
+            parsed = _parse_event_time("2026-07-01T12:00:00+00:00", event_name="CPI")
+
+        assert parsed is not None
+        assert parsed.tzinfo is not None
+        warnings = [r for r in logs if r.get("log_level") == "warning"]
+        assert warnings == []
+
+    def test_naive_high_impact_event_still_blocks_in_window(self) -> None:
+        """B5 dedup: routing through _parse_event_time preserves blackout behavior.
+
+        A naive high-impact event string in-window must still block (and warn).
+        """
+        now = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        events: list[dict[str, object]] = [
+            {
+                "event": "Non-Farm Payrolls",
+                "currency": "USD",
+                "impact": "high",
+                "event_time": "2026-07-01T12:15:00",  # naive, +15min, in-window
+            }
+        ]
+        with structlog.testing.capture_logs() as logs:
+            blocked, reason = check_news_blackout(events, ["USD"], now)
+
+        assert blocked
+        assert "GR-07" in (reason or "")
+        warnings = [r for r in logs if r.get("log_level") == "warning"]
+        assert any("naive" in str(r.get("event", "")).lower() for r in warnings)
 
 
 class TestLimits:

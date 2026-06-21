@@ -31,7 +31,6 @@ from rtrade.llm.pool_builder import build_scan_pool
 
 # Consumer-subscription OAuth tokens are forbidden (ToS) — mirror core.config guard.
 _FORBIDDEN_KEY_PREFIXES = ("sk-ant-oat",)
-_MAX_API_KEYS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +43,7 @@ class ProviderEntry:
     suggested_models: list[str] = field(default_factory=list)
     env_prefix: str = ""  # api_key: e.g. "GEMINI_API_KEY"
     provider_id: str = ""  # oauth: manifest provider_id
+    max_keys: int = 3  # api_key: real Secrets slot count (gemini=5, others=3)
 
 
 PROVIDER_CATALOG: list[ProviderEntry] = [
@@ -52,6 +52,7 @@ PROVIDER_CATALOG: list[ProviderEntry] = [
         kind="api_key",
         flavor="gemini",
         env_prefix="GEMINI_API_KEY",
+        max_keys=5,
         suggested_models=["gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash"],
     ),
     ProviderEntry(
@@ -185,10 +186,14 @@ def _pick_model(entry: ProviderEntry) -> str:
 
 
 def _collect_api_keys(entry: ProviderEntry, env_path: Path) -> int:
-    """Prompt for up to N keys (blank = done). Reject sk-ant-oat*. Returns count."""
+    """Prompt for up to ``entry.max_keys`` keys (blank = done). Reject sk-ant-oat*.
+
+    The cap matches the provider's real ``Secrets`` slot count, so the wizard can
+    never write env keys the credential pool would silently ignore. Returns count.
+    """
     written = 0
     slot = 1
-    while slot <= _MAX_API_KEYS:
+    while slot <= entry.max_keys:
         key = _prompt(f"  {entry.env_prefix}_{slot} (Enter kosong = selesai)> ")
         if not key:
             break
@@ -202,6 +207,8 @@ def _collect_api_keys(entry: ProviderEntry, env_path: Path) -> int:
         print(f"  ✓ {entry.env_prefix}_{slot} tersimpan")  # noqa: T201
         written += 1
         slot += 1
+    if written == entry.max_keys:
+        print(f"  (provider ini mendukung maksimal {entry.max_keys} API key)")  # noqa: T201
     return written
 
 

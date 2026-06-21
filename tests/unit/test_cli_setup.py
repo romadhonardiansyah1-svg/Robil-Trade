@@ -142,6 +142,46 @@ def test_wizard_rejects_sk_ant_oat_key(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 # --------------------------------------------------------------------------- #
+# _collect_api_keys — per-provider slot cap (real Secrets slot count)
+# --------------------------------------------------------------------------- #
+def test_collect_api_keys_caps_non_gemini_at_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rtrade.cli.setup import PROVIDER_CATALOG, _collect_api_keys
+
+    env = tmp_path / ".env"
+    entry = next(e for e in PROVIDER_CATALOG if e.flavor == "anthropic" and e.kind == "api_key")
+
+    # Script 4 keys + blank: the cap (3) must stop acceptance before slot 4.
+    _script_input(monkeypatch, ["k-one", "k-two", "k-three", "k-four", ""])
+    n = _collect_api_keys(entry, env)
+
+    assert n == 3
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert "ANTHROPIC_API_KEY_1=k-one" in lines
+    assert "ANTHROPIC_API_KEY_2=k-two" in lines
+    assert "ANTHROPIC_API_KEY_3=k-three" in lines
+    assert not any(line.startswith("ANTHROPIC_API_KEY_4") for line in lines)
+
+
+def test_collect_api_keys_allows_five_for_gemini(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rtrade.cli.setup import PROVIDER_CATALOG, _collect_api_keys
+
+    env = tmp_path / ".env"
+    entry = next(e for e in PROVIDER_CATALOG if e.flavor == "gemini" and e.kind == "api_key")
+
+    _script_input(monkeypatch, ["g1", "g2", "g3", "g4", "g5"])
+    n = _collect_api_keys(entry, env)
+
+    assert n == 5
+    lines = env.read_text(encoding="utf-8").splitlines()
+    assert "GEMINI_API_KEY_1=g1" in lines
+    assert "GEMINI_API_KEY_5=g5" in lines
+
+
+# --------------------------------------------------------------------------- #
 # verify
 # --------------------------------------------------------------------------- #
 class _FakePool:

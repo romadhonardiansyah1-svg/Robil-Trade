@@ -48,3 +48,8 @@ secrets/
 Thumbs.db
 
 models/
+
+# Superpowers agentic-dev tooling + SDD scratch (local-only, not part of the app)
+.superpowers/
+.kiro/skills/
+.kiro/steering/

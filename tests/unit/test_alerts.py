@@ -182,3 +182,68 @@ class TestHealthCheckerLitellmOptional:
         assert result is not None
         assert result.name == "litellm"
         assert result.status == HealthStatus.DEGRADED
+
+
+# ============================================================================
+# E3: alert delivery robust to arbitrary Markdown-special content
+# ============================================================================
+
+
+class TestTelegramRobustToMarkdownSpecials:
+    """Dynamic content with Markdown specials must never break Telegram parsing.
+
+    Fix chose plain text (parse_mode=None) so no content can produce a 400 and
+    silently drop the alert.
+    """
+
+    @pytest.mark.asyncio
+    async def test_send_telegram_payload_disables_markdown_parsing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        class _Resp:
+            status_code = 200
+            text = "ok"
+
+        class _Client:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> _Client:
+                return self
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+            async def post(self, url: str, json: dict[str, object]) -> _Resp:
+                captured["payload"] = json
+                return _Resp()
+
+        monkeypatch.setattr("rtrade.monitoring.alerts.httpx.AsyncClient", _Client)
+
+        mgr = AlertManager("token", "chat_id", enabled=True)
+        text = mgr._format_alert(
+            AlertLevel.WARNING,
+            "Title _x_ *y* [z](",
+            "err _x_ *y* [z](`backtick`",
+            details={"key_a": "a*b_c[d]("},
+        )
+        ok = await mgr._send_telegram(text)
+
+        assert ok is True
+        payload = captured["payload"]
+        assert isinstance(payload, dict)
+        assert payload["parse_mode"] is None
+
+    def test_format_alert_does_not_emit_literal_markdown_markers(self) -> None:
+        """In plain-text mode the structural template must not show '*' markers."""
+        mgr = AlertManager("token", "chat_id", enabled=False)
+        text = mgr._format_alert(
+            AlertLevel.WARNING,
+            "Provider Down",
+            "boom",
+        )
+        assert "*" not in text
+        assert "ROBIL TRADE ALERT" in text
+        assert "Provider Down" in text

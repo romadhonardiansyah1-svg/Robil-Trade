@@ -17,6 +17,7 @@ import structlog
 from rtrade.core.config import AppConfig, InstrumentConfig
 from rtrade.core.constants import Timeframe
 from rtrade.core.errors import ConfigError
+from rtrade.core.timeutil import timeframe_duration
 from rtrade.data.base import MarketDataProvider
 from rtrade.data.ingestion import ingest_candles
 from rtrade.data.ratelimit import RateLimiter
@@ -24,6 +25,19 @@ from rtrade.persistence.db import create_engine, create_session_factory
 from rtrade.persistence.repositories import CandleRepo, InstrumentRepo
 
 logger = structlog.get_logger(__name__)
+
+# TwelveData/CCXT page size used per fetch. The cursor advances by exactly this
+# many candles each batch so no window is re-fetched (waste) or skipped (gaps).
+_BATCH_SIZE = 499
+
+
+def _advance_cursor(since: datetime, tf: Timeframe, batch: int = _BATCH_SIZE) -> datetime:
+    """Advance the pagination cursor by `batch` candles of timeframe `tf`.
+
+    Uses `timeframe_duration` so every timeframe (M5…D1) steps by the correct
+    amount: D1 advances ~`batch` days, M5 advances ~`batch`×5min, etc.
+    """
+    return since + timeframe_duration(tf) * batch
 
 
 def _make_provider(
@@ -86,10 +100,9 @@ async def _run(symbol: str, timeframe: str, days: int, config_dir: str) -> None:
                 total += count
                 if count == 0:
                     break
-                # Advance since past the last fetched candle.
-                # 500 candles × timeframe duration
-                td = timedelta(hours=1) if tf == Timeframe.H1 else timedelta(hours=4)
-                batch_since = batch_since + td * 499
+                # Advance the cursor by one full page of candles for this
+                # timeframe (tf-aware: no overlap on D1, no gaps on M5/M15).
+                batch_since = _advance_cursor(batch_since, tf)
                 logger.info(
                     "backfill batch done",
                     batch=batch_num,

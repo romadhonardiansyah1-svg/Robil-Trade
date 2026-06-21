@@ -18,6 +18,7 @@ injectable so the handlers can be unit-tested without a live DB or network.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 import contextlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -26,9 +27,16 @@ from decimal import Decimal
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
 from aiogram.types import Message
+import redis.asyncio as aioredis
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 import structlog
 
+from rtrade.core.config import AppConfig
+from rtrade.core.errors import ConfigError
+from rtrade.llm.client import LLMClient
+from rtrade.llm.key_manager import KeyManager
+from rtrade.llm.model_router import resolve_role_model
+from rtrade.llm.pool_builder import build_scan_pool
 from rtrade.monitoring.healthcheck import HealthChecker, HealthStatus, SystemHealth
 from rtrade.persistence.db import _get_engine, create_session_factory
 from rtrade.persistence.models import Signal
@@ -39,6 +47,16 @@ from rtrade.strategies import STRATEGY_REGISTRY
 logger = structlog.get_logger(__name__)
 
 _CALIBRATION_WINDOW_DAYS = 30
+
+# READ-ONLY ops-chat constants -------------------------------------------------
+_POOL_EMPTY_TEXT = "Pool kosong — jalankan: rtrade setup wizard"
+_COST_UNAVAILABLE_TEXT = "Biaya LLM: tidak tersedia (Redis?)"
+_LLM_UNCONFIGURED_TEXT = "🤖 LLM belum dikonfigurasi — jalankan: rtrade setup wizard."
+_ASK_SYSTEM_PROMPT = (
+    "Anda asisten operasional untuk bot sinyal trading (signal-only). "
+    "Jawab dalam Bahasa Indonesia HANYA berdasarkan SNAPSHOT read-only di bawah. "
+    "Anda TIDAK dapat mengubah apa pun, tidak memberi nasihat keuangan."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +136,34 @@ def format_calibration_text(stats: CalibrationStats) -> str:
     return "\n".join(lines)
 
 
+def format_pool_text(rows: list[tuple[str, str, str]]) -> str:
+    """Render the credential pool summary. ``rows`` = (cred_id, flavor, mode).
+
+    cred_id/flavor/mode are internal labels only — never secrets (PLAN A6).
+    Honest message when the pool is empty.
+    """
+    if not rows:
+        return _POOL_EMPTY_TEXT
+    lines = [f"🔑 Credential pool ({len(rows)}):"]
+    for cred_id, flavor, mode in rows:
+        lines.append(f"• {cred_id} [{flavor}] mode={mode}")
+    return "\n".join(lines)
+
+
+def build_ops_snapshot(*, status: str, signals: str, calibration: str, pool: str, cost: str) -> str:
+    """Concatenate already-formatted read-only sections under clear headers.
+
+    The result is fed to the LLM as UNTRUSTED data context (no instructions).
+    """
+    return (
+        f"## STATUS\n{status}\n\n"
+        f"## SINYAL TERAKHIR\n{signals}\n\n"
+        f"## KALIBRASI\n{calibration}\n\n"
+        f"## CREDENTIAL POOL\n{pool}\n\n"
+        f"## BIAYA LLM\n{cost}"
+    )
+
+
 # --- Async data fetchers (own their session lifecycle) -------------------------
 
 
@@ -186,6 +232,50 @@ async def build_status_text(checker: HealthChecker) -> str:
     return format_status_text(health)
 
 
+async def fetch_pool_text(cfg_loader: Callable[[], AppConfig] = AppConfig.load) -> str:
+    """Build the credential pool and render its (cred_id, flavor, mode) summary.
+
+    READ-ONLY: only labels are surfaced — never secret values. On ConfigError /
+    empty pool, returns an honest "Pool kosong" hint instead of raising.
+    """
+    try:
+        cfg = cfg_loader()
+        pool = build_scan_pool(cfg)
+    except ConfigError:
+        return _POOL_EMPTY_TEXT
+    rows = [(e.cred_id, e.flavor, e.credential.mode) for e in pool.entries]
+    return format_pool_text(rows)
+
+
+async def fetch_cost_text(redis_url: str) -> str:
+    """Today's (UTC) LLM spend via KeyManager. Resilient: degrade if no Redis."""
+    if not redis_url:
+        return _COST_UNAVAILABLE_TEXT
+    redis_client = None
+    try:
+        redis_client = aioredis.from_url(redis_url)
+        cost = await KeyManager(redis_client).get_daily_cost()
+        return f"💰 Biaya LLM hari ini (UTC): ${cost:.4f}"
+    except Exception as exc:
+        logger.error("cost fetch failed", error=str(exc))
+        return _COST_UNAVAILABLE_TEXT
+    finally:
+        if redis_client is not None:
+            with contextlib.suppress(Exception):
+                await redis_client.aclose()
+
+
+async def answer_question(question: str, snapshot: str, llm_client: LLMClient, model: str) -> str:
+    """Ask the LLM a question grounded ONLY in the read-only snapshot.
+
+    The snapshot is treated as untrusted data; the system prompt states the bot
+    cannot change anything and must not give financial advice.
+    """
+    user_prompt = snapshot + "\n\nPertanyaan: " + question
+    result = await llm_client.complete(model, _ASK_SYSTEM_PROMPT, user_prompt)
+    return result.content
+
+
 class TelegramDelivery:
     """Telegram bot for signal delivery and commands (PLAN §8.10)."""
 
@@ -199,6 +289,7 @@ class TelegramDelivery:
         litellm_url: str = "",
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         health_checker: HealthChecker | None = None,
+        ask_responder: Callable[[str], Awaitable[str]] | None = None,
     ) -> None:
         if not bot_token:
             raise ValueError("TELEGRAM_BOT_TOKEN is required")
@@ -217,6 +308,8 @@ class TelegramDelivery:
         self._litellm_url = litellm_url
         self._session_factory = session_factory
         self._health_checker = health_checker
+        # READ-ONLY ops chat: injectable seam so tests bypass the real LLM/pool.
+        self._ask_responder = ask_responder
 
         self._register_handlers()
 
@@ -263,6 +356,18 @@ class TelegramDelivery:
         @self._dp.message(Command("enable_strategy"))
         async def cmd_enable_strategy(message: Message) -> None:
             await self._handle_enable_strategy(message)
+
+        @self._dp.message(Command("pool"))
+        async def cmd_pool(message: Message) -> None:
+            await self._handle_pool(message)
+
+        @self._dp.message(Command("cost"))
+        async def cmd_cost(message: Message) -> None:
+            await self._handle_cost(message)
+
+        @self._dp.message(Command("ask"))
+        async def cmd_ask(message: Message) -> None:
+            await self._handle_ask(message)
 
     async def _handle_status(self, message: Message) -> None:
         if not self._is_allowed(message):
@@ -319,6 +424,83 @@ class TelegramDelivery:
             logger.error("enable_strategy handler failed", error=str(exc))
             text = f"⚠️ Gagal mengaktifkan strategi: {exc}"
         await message.answer(text)
+
+    # --- READ-ONLY ops chat handlers (whitelisted, resilient) ------------------
+
+    async def _handle_pool(self, message: Message) -> None:
+        if not self._is_allowed(message):
+            return
+        try:
+            text = await fetch_pool_text()
+        except Exception as exc:  # never raise out of a handler
+            logger.error("pool handler failed", error=str(exc))
+            text = f"⚠️ Gagal mengambil pool: {exc}"
+        await message.answer(text)
+
+    async def _handle_cost(self, message: Message) -> None:
+        if not self._is_allowed(message):
+            return
+        try:
+            text = await fetch_cost_text(self._redis_url)
+        except Exception as exc:  # never raise out of a handler
+            logger.error("cost handler failed", error=str(exc))
+            text = _COST_UNAVAILABLE_TEXT
+        await message.answer(text)
+
+    async def _handle_ask(self, message: Message) -> None:
+        if not self._is_allowed(message):
+            return
+        try:
+            parts = (message.text or "").split(maxsplit=1)
+            question = parts[1].strip() if len(parts) > 1 else ""
+            if not question:
+                await message.answer("Usage: /ask <pertanyaan>")
+                return
+            responder = self._ask_responder or self._build_ask_responder()
+            text = await responder(question)
+        except Exception as exc:  # never raise out of a handler
+            logger.error("ask handler failed", error=str(exc))
+            text = f"⚠️ Gagal menjawab: {exc}"
+        await message.answer(text)
+
+    def _build_ask_responder(self) -> Callable[[str], Awaitable[str]]:
+        """Build the real LLM-backed responder lazily (pool + analyst model)."""
+
+        async def responder(question: str) -> str:
+            snapshot = await self._build_ops_snapshot()
+            try:
+                cfg = AppConfig.load()
+                pool = build_scan_pool(cfg)
+            except ConfigError:
+                return _LLM_UNCONFIGURED_TEXT
+            model = resolve_role_model(cfg, "analyst")
+            client = LLMClient(credential_pool=pool)
+            return await answer_question(question, snapshot, client, model)
+
+        return responder
+
+    async def _build_ops_snapshot(self) -> str:
+        """Assemble the read-only snapshot; each section degrades independently."""
+
+        async def _safe(make: Callable[[], Awaitable[str]], label: str) -> str:
+            try:
+                return await make()
+            except Exception as exc:
+                logger.error("ask snapshot section failed", section=label, error=str(exc))
+                return f"({label} tidak tersedia: {exc})"
+
+        status = await _safe(lambda: build_status_text(self._get_health_checker()), "status")
+        signals = await _safe(
+            lambda: fetch_recent_signals(self._get_session_factory(), limit=5), "signals"
+        )
+        calibration = await _safe(
+            lambda: fetch_calibration(self._get_session_factory()), "calibration"
+        )
+        pool = await _safe(lambda: fetch_pool_text(), "pool")
+        cost = await _safe(lambda: fetch_cost_text(self._redis_url), "cost")
+        return build_ops_snapshot(
+            status=status, signals=signals, calibration=calibration, pool=pool, cost=cost
+        )
 
     def _is_allowed(self, message: Message) -> bool:
         """Whitelist check — only respond to configured chat ID (PLAN §14.1)."""

@@ -272,6 +272,7 @@ def _cmd_use(args: argparse.Namespace) -> None:
 
     from rtrade.llm.auth.model_catalog import list_provider_models
     from rtrade.llm.auth.provider_profiles import load_provider_profiles
+    from rtrade.llm.auth.routing import set_model_route
 
     profiles = load_provider_profiles(None)
     if args.provider not in profiles:
@@ -295,52 +296,24 @@ def _cmd_use(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-    # Determine auth_profile name for this provider
-    auth_profile_name = f"{args.provider}_cli_oauth"
-    if profile.auth_mode == "vertex":
-        auth_profile_name = f"{args.provider}_vertex"
-    elif profile.auth_mode == "api_key":
-        auth_profile_name = f"{args.provider}_api_key"
-
-    # Update settings.yaml
+    # Preserve current semantics: vertex_project dibaca dari llm doc in-memory.
     settings_path = Path("config") / "settings.yaml"
     if settings_path.exists():
         with settings_path.open("r", encoding="utf-8") as fh:
             doc = yaml.safe_load(fh) or {}
     else:
         doc = {}
+    vertex_project = doc.get("llm", {}).get("vertex_project", "")
 
-    llm = doc.setdefault("llm", {})
-    routes = llm.setdefault("model_routes", {})
-    profiles_cfg = llm.setdefault("auth_profiles", {})
-
-    # Buat/lengkapi entri auth_profiles supaya route TIDAK menggantung (C4).
-    entry: dict[str, object] = {"enabled": True}
-    if profile.auth_mode == "vertex":
-        entry["auth_type"] = "vertex"
-        entry["vertex_project"] = llm.get("vertex_project", "")
-    elif profile.auth_mode == "api_key":
-        entry["auth_type"] = "api_key"
-        # api_key_secret kosong → pool pakai key dari Secrets family (lihat pool_builder).
-    else:
-        # oauth2 / external_command / subscription → kredensial token store via CLI login.
-        entry["auth_type"] = "cli_oauth"
-        entry["provider_id"] = args.provider
-        entry["account"] = getattr(args, "account", "default")
-    # Jangan timpa kunci lain yang mungkin sudah diisi operator manual.
-    existing = profiles_cfg.get(auth_profile_name)
-    if isinstance(existing, dict):
-        existing.update(entry)
-    else:
-        profiles_cfg[auth_profile_name] = entry
-
-    routes[args.role] = {
-        "model": args.model,
-        "auth_profile": auth_profile_name,
-    }
-
-    with settings_path.open("w", encoding="utf-8") as fh:
-        yaml.dump(doc, fh, default_flow_style=False, allow_unicode=True)
+    set_model_route(
+        settings_path=settings_path,
+        role=args.role,
+        provider_id=args.provider,
+        model=args.model,
+        auth_mode=profile.auth_mode,
+        account=getattr(args, "account", "default"),
+        vertex_project=vertex_project,
+    )
 
     print(  # noqa: T201
         f"role={args.role} → model={args.model} "

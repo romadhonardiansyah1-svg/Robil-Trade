@@ -93,6 +93,31 @@ class TestKeyManagerCooldown:
         expiry = next(iter(mgr._cooldowns.values()))
         assert expiry < time.time() + 1000
 
+    @pytest.mark.asyncio
+    async def test_redis_setex_uses_cooldown_override_ttl(self) -> None:
+        """The Redis setex path must use the override TTL when provided."""
+
+        class _FakeRedis:
+            def __init__(self) -> None:
+                self.recorded_ttl: int | None = None
+
+            async def setex(self, key: str, ttl: int, val: str) -> None:
+                self.recorded_ttl = ttl
+
+        fake = _FakeRedis()
+        mgr = KeyManager(
+            redis_client=fake,
+            keys_by_provider={"gemini": ["k"]},
+            cooldown_seconds=60,
+        )
+
+        await mgr.report_rate_limit("gemini", "k", cooldown_seconds=18000)
+        assert fake.recorded_ttl == 18000
+
+        # Omitting the override records the configured default (60s).
+        await mgr.report_rate_limit("gemini", "k")
+        assert fake.recorded_ttl == 60
+
 
 class TestKeyManagerBudget:
     @pytest.mark.asyncio

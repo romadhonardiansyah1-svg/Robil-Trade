@@ -99,7 +99,15 @@ def test_classify_llm_error() -> None:
 
 
 def test_classify_subscription_limit() -> None:
-    """Subscription/usage-WINDOW limits escalate to 'subscription_limit'."""
+    """Subscription/usage-WINDOW limits escalate to 'subscription_limit'.
+
+    Each phrase is escalated either via an explicit subscription/plan phrase or
+    via a limit/quota context combined with a LONG-window reset indicator
+    (hours/days/midnight/etc.). The two long-window cases below
+    ("...5 hours" and "...reset at midnight") deliberately keep their
+    long-window indicator so they remain subscription_limit under the
+    refined rule.
+    """
     for phrase in (
         "You have hit your usage limit",
         "Daily limit reached",
@@ -107,10 +115,10 @@ def test_classify_subscription_limit() -> None:
         "Monthly limit hit",
         "quota exceeded for this plan",
         "plan limit reached",
-        "Please try again in 5 hours",
+        "Please try again in 5 hours",  # long-window: "hours"
         "rate limit exceeded for your plan",
         "you've reached your usage cap",
-        "limit reached, will reset at midnight",
+        "limit reached, will reset at midnight",  # long-window: "reset at"/"midnight"
     ):
         assert classify_llm_error(Exception(phrase)) == "subscription_limit", phrase
 
@@ -120,6 +128,24 @@ def test_classify_subscription_limit_does_not_steal_rate_limit() -> None:
     assert classify_llm_error(Exception("RESOURCE_EXHAUSTED: quota")) == "rate_limit"
     assert classify_llm_error(Exception("HTTP 429 too many requests")) == "rate_limit"
     assert classify_llm_error(Exception("quota")) == "rate_limit"
+
+
+def test_classify_transient_429_stays_rate_limit() -> None:
+    """Regression: SHORT transient throttling must NOT escalate to subscription_limit.
+
+    The old matcher treated bare "try again in" and ("reset" + "limit") as a
+    5-hour subscription window, mis-benching a credential for hours on an
+    ordinary transient 429. These must all stay 'rate_limit'.
+    """
+    for phrase in (
+        "rate limit, try again in 30 seconds",
+        "rate limit; resets in 45s",
+        "too many requests, retry in 2 minutes",
+        "HTTP 429 too many requests",
+        "RESOURCE_EXHAUSTED: quota",
+        "quota",
+    ):
+        assert classify_llm_error(Exception(phrase)) == "rate_limit", phrase
 
 
 def test_report_failure_forwards_cooldown_override() -> None:

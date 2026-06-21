@@ -8,6 +8,7 @@ ke kredensial berikutnya. cred_id yang dirotasi adalah label internal — BUKAN 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 import structlog
@@ -18,6 +19,9 @@ from rtrade.llm.key_manager import AllKeysExhaustedError, KeyManager
 logger = structlog.get_logger(__name__)
 
 _POOL_KEY = "llm_pool"
+
+# Short transient retry hints like "30s", "45s", "60s", "2 m" -> stay rate_limit.
+_SHORT_WINDOW_RE = re.compile(r"\b\d+\s*(?:s|m|sec|secs|min|mins)\b")
 
 
 class AllCredentialsExhaustedError(Exception):
@@ -59,42 +63,81 @@ def translate_model(model: str, flavor: str) -> str | None:
 
 
 def classify_llm_error(exc: BaseException) -> str:
-    """'subscription_limit' | 'rate_limit' | 'auth' | 'other' — by exc name + message.
+    """'subscription_limit' | 'rate_limit' | 'auth' | 'other' -> by exc name + message.
 
     Precedence (checked in this order):
-      1. ``subscription_limit`` — usage/plan/quota WINDOW that resets over hours.
-         Matches explicit window phrases only (case-insensitive): "usage limit",
-         "daily limit", "weekly limit", "monthly limit", "quota exceeded",
-         "plan limit", "try again in", "rate limit exceeded for your plan",
-         "you've reached your usage", or "reset" together with "limit". A BARE
-         "quota"/"429"/"resource_exhausted" does NOT escalate here — those stay
-         ``rate_limit`` (see below).
-      2. ``rate_limit`` — transient throttling: RateLimitError, "429",
-         "rate limit", "resource_exhausted", bare "quota".
-      3. ``auth`` — AuthenticationError/PermissionDeniedError, "401"/"403",
+      1. ``subscription_limit`` -- a usage/plan WINDOW that resets over HOURS,
+         which warrants a long cooldown. Escalates ONLY when EITHER:
+           (a) an explicit subscription/plan phrase is present (case-insensitive):
+               "usage limit", "daily limit", "weekly limit", "monthly limit",
+               "quota exceeded", "plan limit", "rate limit exceeded for your plan",
+               "you've reached your usage", "you have hit your usage"; OR
+           (b) a limit/quota error context (one of "limit", "quota", "429",
+               "rate limit", "too many requests", "try again in") is COMBINED with
+               a LONG-window reset indicator -- one of "hour", "hours", "day",
+               "days", "week", "month", "tomorrow", "midnight", "reset at",
+               "resets at" -- AND the message does NOT also carry a SHORT transient
+               window (seconds/minutes, e.g. "30 seconds", "2 minutes", "45s").
+         A BARE "quota"/"429"/"resource_exhausted", or a short transient retry hint
+         like "try again in 30 seconds", does NOT escalate -- those stay
+         ``rate_limit`` (see below). This avoids benching a credential for hours on
+         an ordinary transient 429.
+      2. ``rate_limit`` -- transient throttling: RateLimitError, "429",
+         "rate limit", "resource_exhausted", "too many requests", bare "quota".
+      3. ``auth`` -- AuthenticationError/PermissionDeniedError, "401"/"403",
          "unauthorized", "invalid api key", "belum login".
-      4. ``other`` — everything else.
+      4. ``other`` -- everything else.
     """
     name = type(exc).__name__
     msg = str(exc).lower()
-    subscription_phrases = (
+
+    explicit_subscription_phrases = (
         "usage limit",
         "daily limit",
         "weekly limit",
         "monthly limit",
         "quota exceeded",
         "plan limit",
-        "try again in",
         "rate limit exceeded for your plan",
         "you've reached your usage",
+        "you have hit your usage",
     )
-    if any(p in msg for p in subscription_phrases) or ("reset" in msg and "limit" in msg):
+    long_window_indicators = (
+        "hour",
+        "hours",
+        "day",
+        "days",
+        "week",
+        "month",
+        "tomorrow",
+        "midnight",
+        "reset at",
+        "resets at",
+    )
+    short_window_words = ("second", "seconds", "minute", "minutes")
+    limit_context = (
+        "limit" in msg
+        or "quota" in msg
+        or "429" in msg
+        or "rate limit" in msg
+        or "too many requests" in msg
+        or "try again in" in msg
+    )
+    has_short_window = any(w in msg for w in short_window_words) or bool(
+        _SHORT_WINDOW_RE.search(msg)
+    )
+    has_long_window = any(w in msg for w in long_window_indicators)
+
+    is_explicit = any(p in msg for p in explicit_subscription_phrases)
+    is_long_window_limit = limit_context and has_long_window and not has_short_window
+    if is_explicit or is_long_window_limit:
         return "subscription_limit"
     if (
         name == "RateLimitError"
         or "429" in msg
         or "rate limit" in msg
         or "resource_exhausted" in msg
+        or "too many requests" in msg
         or "quota" in msg
     ):
         return "rate_limit"

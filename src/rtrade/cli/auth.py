@@ -96,7 +96,7 @@ def _cmd_login(args: argparse.Namespace) -> None:
         asyncio.run(build_generic_oauth_from_env().device_login())
     else:
         # Hermes-style: load profile and login via appropriate flow
-        from rtrade.llm.auth.provider_profiles import load_provider_profiles
+        from rtrade.llm.auth.provider_profiles import load_provider_profiles, resolve_env_profile
         from rtrade.llm.auth.registry import build_provider_from_profile
         from rtrade.llm.auth.token_store import account_store_id
 
@@ -124,7 +124,39 @@ def _cmd_login(args: argparse.Namespace) -> None:
         # Build store_id = provider__account
         sid = account_store_id(args.provider, account)
         provider = build_provider_from_profile(args.provider, store_id=sid)
-        asyncio.run(provider.device_login())
+
+        # Dispatch by the profile's login_flow. device_code (or empty/legacy) keeps
+        # the existing device flow; pkce_loopback/paste_url use the PKCE paste-URL
+        # path (VPS-ready). --manual-paste/--no-browser force the paste path.
+        login_flow = profile.login_flow or "device_code"
+        if login_flow in ("pkce_loopback", "paste_url"):
+            resolved = resolve_env_profile(profile)
+            if not resolved.client_id:
+                missing = profile.client_id_env or "client_id"
+                raise SystemExit(
+                    f"Login {args.provider} butuh client_id — set env {missing} "
+                    "(lihat config/oauth_providers.example.yaml)."
+                )
+            if not resolved.authorize_url:
+                missing = profile.authorize_url_env or "authorize_url"
+                raise SystemExit(
+                    f"Login {args.provider} butuh authorize_url — set env {missing} "
+                    "atau isi authorize_url di manifest."
+                )
+            if not resolved.redirect_uri:
+                missing = profile.redirect_uri_env or "redirect_uri"
+                raise SystemExit(
+                    f"Login {args.provider} butuh redirect_uri — set env {missing} "
+                    "atau isi redirect_uri di manifest."
+                )
+            asyncio.run(
+                provider.pkce_paste_login(
+                    authorize_url=resolved.authorize_url,
+                    redirect_uri=resolved.redirect_uri,
+                )
+            )
+        else:
+            asyncio.run(provider.device_login())
         print(f"✓ Login berhasil — token tersimpan ({sid})")  # noqa: T201
 
 
@@ -356,9 +388,20 @@ def main() -> None:
     )
     login.add_argument(
         "--flow",
-        choices=["loopback", "paste_url", "device_code"],
+        choices=["loopback", "paste_url", "device_code", "pkce_loopback", "paste_code"],
         default=None,
         help="Login flow (default: auto-detect)",
+    )
+    login.add_argument(
+        "--manual-paste",
+        action="store_true",
+        help="Paksa jalur paste-URL (VPS/headless): buka URL authorize di browser lokal "
+        "lalu tempel URL callback (tidak ada auto-open browser)",
+    )
+    login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Jangan buka browser otomatis — sama dengan --manual-paste untuk task ini",
     )
 
     sub.add_parser("providers", help="List available OAuth providers")

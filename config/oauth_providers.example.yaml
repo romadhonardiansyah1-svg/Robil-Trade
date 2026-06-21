@@ -159,16 +159,23 @@ oauth_providers:
     enabled: true
     token_url_env: RTRADE_XAI_TOKEN_URL
     client_id_env: RTRADE_XAI_CLIENT_ID
+    authorize_url_env: RTRADE_XAI_AUTHORIZE_URL
+    redirect_uri_env: RTRADE_XAI_REDIRECT_URI
     scopes_env: ""
-    device_auth_url_env: RTRADE_XAI_DEVICE_AUTH_URL
+    device_auth_url_env: ""
     note: >
-      Login akun X/SuperGrok via Device Code Flow (gaya Hermes xai-oauth).
-      Token disimpan di token_store terenkripsi, auto-refresh, masuk credential pool.
-    login_flow: device_code
+      xAI Grok = PKCE Authorization-Code Flow (loopback 127.0.0.1), BUKAN device code.
+      Set RTRADE_XAI_CLIENT_ID (wajib — tidak di-hardcode; minta/verifikasi sendiri).
+      Login: `rtrade auth login --provider xai_oauth`. Di VPS headless gunakan
+      `--manual-paste` (atau `ssh -L 56121:127.0.0.1:56121 vps`) lalu buka URL authorize
+      di browser LOKAL, setujui, dan tempel URL callback lengkap. Token disimpan di
+      token_store terenkripsi, auto-refresh, masuk credential pool.
+    login_flow: pkce_loopback
     requires_official_oauth: false
     transport: HTTPS
-    device_auth_url: "https://accounts.x.ai/oauth/authorize/device"
+    authorize_url: "https://accounts.x.ai/oauth/authorize"
     token_url: "https://accounts.x.ai/oauth/token"
+    redirect_uri: "http://127.0.0.1:56121/callback"
     models:
       - xai/grok-4
       - xai/grok-3

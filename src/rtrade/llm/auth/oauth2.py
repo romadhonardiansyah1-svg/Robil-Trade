@@ -312,15 +312,12 @@ class OAuth2Provider(CredentialProvider):
         redirect_uri: str,
         code_verifier: str,
     ) -> StoredToken:
-        """Exchange authorization code from pasted redirect URL for token."""
-        parsed = urlparse(redirect_response)
-        qs = parse_qs(parsed.query)
-        if "code" not in qs:
-            raise ValueError(
-                "URL redirect tidak mengandung parameter 'code'. "
-                "Pastikan Anda menyalin URL lengkap dari address bar."
-            )
-        code = qs["code"][0]
+        """Exchange authorization code from pasted redirect URL for token.
+
+        Accepts either a full redirect/callback URL (`...?code=...&state=...`),
+        a bare query string (`?code=...&state=...`), or a bare code value.
+        """
+        code = _extract_code(redirect_response)
         data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -332,6 +329,70 @@ class OAuth2Provider(CredentialProvider):
         tok = await self._token_request(data)
         save_token(self._sid, tok)
         return tok
+
+    async def pkce_paste_login(
+        self,
+        *,
+        authorize_url: str,
+        redirect_uri: str,
+    ) -> StoredToken:
+        """PKCE Authorization-Code login via paste-URL (VPS/headless friendly).
+
+        Builds the authorize URL the user opens in a LOCAL browser, then reads
+        the pasted callback URL (or bare code) back. Verifies the `state`
+        parameter to defend against CSRF before exchanging the code.
+
+        Never logs/echoes the code, verifier, or token values.
+        """
+        verifier, challenge = generate_pkce_pair()
+        state = secrets.token_urlsafe(24)
+        url = self.build_authorize_url(
+            redirect_uri=redirect_uri,
+            state=state,
+            code_challenge=challenge,
+            authorize_url=authorize_url,
+        )
+
+        # Hermes-style interactive block (user-facing prompts only — no secrets).
+        print(f"\n{'=' * 70}")  # noqa: T201
+        print("  Login PKCE (Authorization Code) — buka URL ini di browser LOKAL:")  # noqa: T201
+        print(f"\n  {url}\n")  # noqa: T201
+        print("  Setujui akses, lalu SALIN URL callback lengkap dari address bar")  # noqa: T201
+        print(f"  (diawali {redirect_uri}) dan tempel di bawah.")  # noqa: T201
+        print("  Menempel URL LENGKAP lebih aman (memuat 'state' untuk cek CSRF);")  # noqa: T201
+        print("  menempel kode mentah tetap diterima bila tanpa 'state'.")  # noqa: T201
+        print(f"{'=' * 70}\n")  # noqa: T201
+
+        pasted = input("Tempel URL callback / kode di sini: ").strip()
+
+        # SECURITY: if the paste carries a state param, it MUST match ours (CSRF).
+        returned_state = parse_qs(urlparse(pasted).query).get("state", [])
+        if returned_state and returned_state[0] != state:
+            raise ValueError("state mismatch (kemungkinan CSRF) — ulangi login")
+
+        tok = await self.exchange_pasted_redirect(
+            redirect_response=pasted,
+            redirect_uri=redirect_uri,
+            code_verifier=verifier,
+        )
+        logger.info("pkce paste login berhasil", provider=self._sid)
+        return tok
+
+
+def _extract_code(redirect_response: str) -> str:
+    """Extract the authorization code from a pasted URL, query string, or bare code."""
+    value = redirect_response.strip()
+    parsed = urlparse(value)
+    qs = parse_qs(parsed.query)
+    if "code" in qs:
+        return qs["code"][0]
+    # Bare code: no scheme and no query params, not a key=value pair.
+    if not parsed.scheme and not parsed.query and value and "=" not in value:
+        return value
+    raise ValueError(
+        "URL redirect tidak mengandung parameter 'code'. "
+        "Pastikan Anda menyalin URL lengkap dari address bar."
+    )
 
 
 def generate_pkce_pair() -> tuple[str, str]:

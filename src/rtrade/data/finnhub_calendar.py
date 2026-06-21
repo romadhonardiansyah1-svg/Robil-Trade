@@ -173,8 +173,24 @@ class FinnhubCalendarProvider(CalendarProvider):
         if resp.status_code >= 400:
             raise ProviderError(f"Finnhub HTTP {resp.status_code}: {resp.text[:200]}")
 
-        body = resp.json()
-        raw_events = body.get("economicCalendar", [])
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ProviderError(f"Finnhub calendar: invalid JSON body: {exc}") from exc
+
+        if not isinstance(body, dict):
+            raise ProviderError(
+                f"Finnhub calendar: unexpected response shape: {type(body).__name__}"
+            )
+        # A genuinely-empty calendar returns {"economicCalendar": []}; a response
+        # missing the key entirely is schema drift and must RAISE (not masked []).
+        if "economicCalendar" not in body:
+            raise ProviderError(
+                "Finnhub calendar: response missing 'economicCalendar' key (schema drift)"
+            )
+        raw_events = body["economicCalendar"]
+        if not isinstance(raw_events, list):
+            raise ProviderError("Finnhub calendar: 'economicCalendar' is not a list (schema drift)")
 
         if not raw_events:
             logger.info("Finnhub returned no events", start=start.isoformat(), end=end.isoformat())

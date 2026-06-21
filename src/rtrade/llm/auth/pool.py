@@ -59,9 +59,37 @@ def translate_model(model: str, flavor: str) -> str | None:
 
 
 def classify_llm_error(exc: BaseException) -> str:
-    """'rate_limit' | 'auth' | 'other' — berbasis nama exception + isi pesan."""
+    """'subscription_limit' | 'rate_limit' | 'auth' | 'other' — by exc name + message.
+
+    Precedence (checked in this order):
+      1. ``subscription_limit`` — usage/plan/quota WINDOW that resets over hours.
+         Matches explicit window phrases only (case-insensitive): "usage limit",
+         "daily limit", "weekly limit", "monthly limit", "quota exceeded",
+         "plan limit", "try again in", "rate limit exceeded for your plan",
+         "you've reached your usage", or "reset" together with "limit". A BARE
+         "quota"/"429"/"resource_exhausted" does NOT escalate here — those stay
+         ``rate_limit`` (see below).
+      2. ``rate_limit`` — transient throttling: RateLimitError, "429",
+         "rate limit", "resource_exhausted", bare "quota".
+      3. ``auth`` — AuthenticationError/PermissionDeniedError, "401"/"403",
+         "unauthorized", "invalid api key", "belum login".
+      4. ``other`` — everything else.
+    """
     name = type(exc).__name__
     msg = str(exc).lower()
+    subscription_phrases = (
+        "usage limit",
+        "daily limit",
+        "weekly limit",
+        "monthly limit",
+        "quota exceeded",
+        "plan limit",
+        "try again in",
+        "rate limit exceeded for your plan",
+        "you've reached your usage",
+    )
+    if any(p in msg for p in subscription_phrases) or ("reset" in msg and "limit" in msg):
+        return "subscription_limit"
     if (
         name == "RateLimitError"
         or "429" in msg
@@ -127,7 +155,13 @@ class CredentialPool:
             f"semua {self.size} kredensial sudah dicoba di panggilan ini"
         )
 
-    async def report_failure(self, cred_id: str, *, kind: str = "rate_limit") -> None:
-        """Tandai kredensial gagal → cooldown. kind hanya untuk logging."""
+    async def report_failure(
+        self, cred_id: str, *, kind: str = "rate_limit", cooldown_seconds: int | None = None
+    ) -> None:
+        """Tandai kredensial gagal → cooldown.
+
+        kind hanya untuk logging. cooldown_seconds (opsional) meng-override TTL
+        cooldown; None = pakai default KeyManager.
+        """
         logger.warning("credential failure — cooldown", cred_id=cred_id, kind=kind)
-        await self._km.report_rate_limit(_POOL_KEY, cred_id)
+        await self._km.report_rate_limit(_POOL_KEY, cred_id, cooldown_seconds=cooldown_seconds)

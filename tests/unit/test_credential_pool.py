@@ -96,3 +96,58 @@ def test_classify_llm_error() -> None:
     assert classify_llm_error(Exception("401 Unauthorized")) == "auth"
     assert classify_llm_error(RuntimeError("gw: tidak ada token valid. Belum login")) == "auth"
     assert classify_llm_error(Exception("connection reset")) == "other"
+
+
+def test_classify_subscription_limit() -> None:
+    """Subscription/usage-WINDOW limits escalate to 'subscription_limit'."""
+    for phrase in (
+        "You have hit your usage limit",
+        "Daily limit reached",
+        "weekly limit exceeded",
+        "Monthly limit hit",
+        "quota exceeded for this plan",
+        "plan limit reached",
+        "Please try again in 5 hours",
+        "rate limit exceeded for your plan",
+        "you've reached your usage cap",
+        "limit reached, will reset at midnight",
+    ):
+        assert classify_llm_error(Exception(phrase)) == "subscription_limit", phrase
+
+
+def test_classify_subscription_limit_does_not_steal_rate_limit() -> None:
+    """Bare quota / 429 / resource_exhausted must STILL be 'rate_limit'."""
+    assert classify_llm_error(Exception("RESOURCE_EXHAUSTED: quota")) == "rate_limit"
+    assert classify_llm_error(Exception("HTTP 429 too many requests")) == "rate_limit"
+    assert classify_llm_error(Exception("quota")) == "rate_limit"
+
+
+def test_report_failure_forwards_cooldown_override() -> None:
+    import time
+
+    pool = _pool(1)
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="subscription_limit", cooldown_seconds=18000)
+        # Inspect the in-memory cooldown expiry (no Redis configured).
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    # Expiry should be ~now + 18000s, far beyond the default 60s.
+    assert expiry > time.time() + 17000
+
+
+def test_report_failure_default_cooldown() -> None:
+    import time
+
+    pool = _pool(1)
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id)
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    # Default cooldown is 60s; well under 1000s in the future.
+    assert expiry < time.time() + 1000

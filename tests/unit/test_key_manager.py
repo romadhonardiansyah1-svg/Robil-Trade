@@ -65,6 +65,34 @@ class TestKeyManagerCooldown:
         with pytest.raises(AllKeysExhaustedError):
             await mgr.get_next_key("gemini")
 
+    @pytest.mark.asyncio
+    async def test_cooldown_override_sets_long_in_memory_cooldown(self) -> None:
+        """An explicit cooldown_seconds overrides the default TTL (in-memory)."""
+        import time
+
+        mgr = KeyManager(
+            keys_by_provider={"gemini": ["key_a"]},
+            cooldown_seconds=60,
+        )
+        await mgr.report_rate_limit("gemini", "key_a", cooldown_seconds=18000)
+
+        expiry = next(iter(mgr._cooldowns.values()))
+        assert expiry > time.time() + 17000
+
+    @pytest.mark.asyncio
+    async def test_cooldown_default_when_override_omitted(self) -> None:
+        """Omitting cooldown_seconds uses the configured default (60s)."""
+        import time
+
+        mgr = KeyManager(
+            keys_by_provider={"gemini": ["key_a"]},
+            cooldown_seconds=60,
+        )
+        await mgr.report_rate_limit("gemini", "key_a")
+
+        expiry = next(iter(mgr._cooldowns.values()))
+        assert expiry < time.time() + 1000
+
 
 class TestKeyManagerBudget:
     @pytest.mark.asyncio

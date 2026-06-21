@@ -172,6 +172,20 @@ class LLMBudgetSettings(_StrictModel):
     max_steps_per_scan: int = Field(default=8, ge=1)
 
 
+class PoolSettings(_StrictModel):
+    """Adaptive cooldown TTLs for the credential pool (multi-account fallback).
+
+    Three tiers map onto ``classify_llm_error`` kinds: transient rate limits,
+    auth failures, and subscription/usage-window limits (the ~5h reset). All
+    bounded to (0, 21600] seconds (6h) so a typo can't disable or absurdly
+    extend a cooldown.
+    """
+
+    cooldown_seconds: int = Field(default=60, gt=0, le=21600)
+    auth_cooldown_seconds: int = Field(default=300, gt=0, le=21600)
+    subscription_cooldown_seconds: int = Field(default=18000, gt=0, le=21600)
+
+
 class LLMSettings(_StrictModel):
     enabled: bool
     analyst_model: str = Field(min_length=1)
@@ -194,6 +208,8 @@ class LLMSettings(_StrictModel):
     model_routes: dict[str, Any] = Field(default_factory=dict)
     # --- Budget guard (G-11) ---
     budget: LLMBudgetSettings = Field(default_factory=LLMBudgetSettings)
+    # --- Adaptive cooldown pool (multi-account fallback) ---
+    pool: PoolSettings = Field(default_factory=PoolSettings)
 
 
 class WalkForwardSettings(_StrictModel):

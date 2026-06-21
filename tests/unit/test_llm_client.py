@@ -225,6 +225,51 @@ class TestPoolFallback:
         assert result.content == '{"ok": true}'
         assert calls == ["AIza-limit", "AIza-ok"]
 
+    def test_pool_fallback_on_subscription_limit(self, monkeypatch) -> None:
+        """Kredensial pertama kena subscription/usage-window limit → rotate ke k2.
+
+        Membuktikan subscription_limit kini ME-ROTATE (bukan raise) — k2 sukses.
+        """
+        import asyncio
+
+        from rtrade.llm.auth.api_key import ApiKeyProvider
+        from rtrade.llm.auth.pool import CredentialPool, PooledCredential
+
+        pool = CredentialPool(
+            [
+                PooledCredential("k1", "gemini", ApiKeyProvider("AIza-sublimit")),
+                PooledCredential("k2", "gemini", ApiKeyProvider("AIza-ok")),
+            ]
+        )
+        calls: list[str] = []
+
+        async def fake_acompletion(**kwargs):
+            calls.append(kwargs["api_key"])
+            if kwargs["api_key"] == "AIza-sublimit":
+                raise Exception("usage limit reached, try again in 5 hours")
+
+            class Msg:
+                content = '{"ok": true}'
+
+            class Choice:
+                message = Msg()
+
+            class Usage:
+                prompt_tokens = 1
+                completion_tokens = 1
+
+            class Resp:
+                choices = [Choice()]
+                usage = Usage()
+
+            return Resp()
+
+        monkeypatch.setattr("litellm.acompletion", fake_acompletion)
+        client = LLMClient(max_retries=0, credential_pool=pool)
+        result = asyncio.run(client.complete("gemini/test-model", "sys", "user"))
+        assert result.content == '{"ok": true}'
+        assert calls == ["AIza-sublimit", "AIza-ok"]
+
     def test_pool_all_exhausted_raises_unavailable(self, monkeypatch) -> None:
         """Semua kredensial gagal → LLMUnavailableError."""
         import asyncio

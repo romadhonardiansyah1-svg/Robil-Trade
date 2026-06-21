@@ -85,21 +85,27 @@ class KeyManager:
             f"all {n} keys for provider '{provider}' are in cooldown ({self._cooldown_sec}s)"
         )
 
-    async def report_rate_limit(self, provider: str, key: str) -> None:
+    async def report_rate_limit(
+        self, provider: str, key: str, *, cooldown_seconds: int | None = None
+    ) -> None:
         """Mark a key as rate-limited (429 response).
 
-        Puts the key into cooldown for `cooldown_seconds`.
+        Puts the key into cooldown. When ``cooldown_seconds`` is provided it
+        is used as the TTL for BOTH the Redis ``setex`` path and the in-memory
+        fallback; when ``None`` the manager's configured ``cooldown_seconds``
+        default is used (legacy behavior).
         """
+        ttl = cooldown_seconds if cooldown_seconds is not None else self._cooldown_sec
         cooldown_key = f"rtrade:cooldown:{provider}:{_key_id(key)}"
 
         if self._redis is not None:
             try:
-                await self._redis.setex(cooldown_key, self._cooldown_sec, "1")
+                await self._redis.setex(cooldown_key, ttl, "1")
                 logger.warning(
                     "key rate-limited, entering cooldown",
                     provider=provider,
                     key_masked=_mask(key),
-                    cooldown_sec=self._cooldown_sec,
+                    cooldown_sec=ttl,
                 )
                 return
             except Exception as exc:
@@ -111,11 +117,12 @@ class KeyManager:
         # Fallback: in-memory cooldown.
         import time
 
-        self._cooldowns[cooldown_key] = time.time() + self._cooldown_sec
+        self._cooldowns[cooldown_key] = time.time() + ttl
         logger.warning(
             "key rate-limited (memory cooldown)",
             provider=provider,
             key_masked=_mask(key),
+            cooldown_sec=ttl,
         )
 
     async def report_cost(self, provider: str, key: str, cost_usd: float) -> None:

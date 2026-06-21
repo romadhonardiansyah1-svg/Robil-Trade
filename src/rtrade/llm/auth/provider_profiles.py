@@ -35,6 +35,10 @@ class OAuthProviderProfile:
     device_auth_url: str = ""  # A0: hardcoded default (manifest inline)
     token_url: str = ""  # A0: hardcoded default (manifest inline)
     client_id: str = ""  # A0: hardcoded default (manifest inline)
+    authorize_url: str = ""  # PKCE: authorization endpoint (manifest inline)
+    authorize_url_env: str = ""  # PKCE: authorization endpoint via env var
+    redirect_uri: str = ""  # PKCE: loopback callback URI (manifest inline)
+    redirect_uri_env: str = ""  # PKCE: loopback callback URI via env var
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +52,8 @@ class ResolvedOAuthProfile:
     grant_type: str = "client_credentials"
     device_auth_url: str = ""
     has_official_oauth_endpoint: bool = False
+    authorize_url: str = ""  # PKCE: resolved authorization endpoint
+    redirect_uri: str = ""  # PKCE: resolved loopback callback URI
 
 
 # Guard: token dari tool konsumen lain TIDAK boleh dibaca oleh adapter.
@@ -70,16 +76,21 @@ def is_subscription_oauth(provider_id: str, profile: OAuthProviderProfile) -> bo
 def validate_provider_profile(provider_id: str, profile: OAuthProviderProfile) -> list[str]:
     """Validasi profile dengan id, kembalikan daftar masalah. Kosong = OK."""
     issues = validate_profile(profile)
-    # Subscription OAuth wajib punya device_auth_url atau device_auth_url_env
-    if (
-        profile.capability == "subscription_oauth"
-        and not profile.device_auth_url
-        and not profile.device_auth_url_env
-    ):
-        issues.append(
-            "subscription_oauth wajib punya device_auth_url atau "
-            "device_auth_url_env untuk Device Code Flow"
-        )
+    # Subscription OAuth endpoint requirement depends on the login flow:
+    #   - device_code (or empty/legacy) → wajib device_auth_url / device_auth_url_env
+    #   - pkce_loopback / paste_url     → wajib authorize_url / authorize_url_env
+    if profile.capability == "subscription_oauth":
+        if profile.login_flow in ("pkce_loopback", "paste_url"):
+            if not profile.authorize_url and not profile.authorize_url_env:
+                issues.append(
+                    f"login_flow={profile.login_flow} wajib punya authorize_url atau "
+                    "authorize_url_env untuk PKCE Authorization-Code Flow"
+                )
+        elif not profile.device_auth_url and not profile.device_auth_url_env:
+            issues.append(
+                "subscription_oauth wajib punya device_auth_url atau "
+                "device_auth_url_env untuk Device Code Flow"
+            )
     # External command TIDAK boleh membaca sumber consumer tool lain
     joined = " ".join([profile.note, " ".join(profile.external_command)])
     for needle in _CONSUMER_TOKEN_SOURCES:
@@ -131,6 +142,10 @@ def load_provider_profiles(
             device_auth_url=data.get("device_auth_url", ""),
             token_url=data.get("token_url", ""),
             client_id=data.get("client_id", ""),
+            authorize_url=data.get("authorize_url", ""),
+            authorize_url_env=data.get("authorize_url_env", ""),
+            redirect_uri=data.get("redirect_uri", ""),
+            redirect_uri_env=data.get("redirect_uri_env", ""),
         )
     return result
 
@@ -151,12 +166,23 @@ def resolve_env_profile(profile: OAuthProviderProfile) -> ResolvedOAuthProfile:
     if not device_url and profile.device_auth_url_env:
         device_url = os.environ.get(profile.device_auth_url_env, "")
 
+    # PKCE: prefer inline manifest value, fallback to env var.
+    authorize_url = profile.authorize_url
+    if not authorize_url and profile.authorize_url_env:
+        authorize_url = os.environ.get(profile.authorize_url_env, "")
+
+    redirect_uri = profile.redirect_uri
+    if not redirect_uri and profile.redirect_uri_env:
+        redirect_uri = os.environ.get(profile.redirect_uri_env, "")
+
     return ResolvedOAuthProfile(
         token_url=token_url,
         client_id=client_id,
         scopes=scopes_raw.split() if scopes_raw else [],
         device_auth_url=device_url,
         has_official_oauth_endpoint=bool(token_url),
+        authorize_url=authorize_url,
+        redirect_uri=redirect_uri,
     )
 
 

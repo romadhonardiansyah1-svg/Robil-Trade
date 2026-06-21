@@ -120,13 +120,57 @@ async def _run(symbol: str, timeframe: str, days: int, config_dir: str) -> None:
         await engine.dispose()
 
 
+async def _run_all(days: int, config_dir: str) -> list[tuple[str, str, str]]:
+    """Backfill EVERY configured instrument × timeframe, fail-soft.
+
+    One (symbol, timeframe) failure is logged and recorded but never aborts the
+    remaining work. Returns a list of `(symbol, timeframe, status)` tuples where
+    status is "ok" or "FAILED: <short>".
+    """
+    cfg = AppConfig.load(config_dir=Path(config_dir))
+
+    results: list[tuple[str, str, str]] = []
+    for instrument in cfg.instruments:
+        symbol = instrument.symbol
+        for tf in instrument.timeframes:
+            tf_value = tf.value
+            try:
+                await _run(symbol, tf_value, days, config_dir)
+                results.append((symbol, tf_value, "ok"))
+            except Exception as exc:  # fail-soft: log and keep going
+                logger.warning(
+                    "backfill all: instrument failed",
+                    symbol=symbol,
+                    timeframe=tf_value,
+                    error=str(exc),
+                )
+                results.append((symbol, tf_value, f"FAILED: {exc}"))
+
+    ok = sum(1 for *_, status in results if status == "ok")
+    failed = len(results) - ok
+    logger.info("backfill all completed", total=len(results), ok=ok, failed=failed)
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill candle data")
-    parser.add_argument("symbol", help="e.g. XAUUSD")
-    parser.add_argument("timeframe", help="e.g. 1h, 4h, 1d")
+    parser.add_argument("symbol", nargs="?", default=None, help="e.g. XAUUSD")
+    parser.add_argument("timeframe", nargs="?", default=None, help="e.g. 1h, 4h, 1d")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="backfill every configured instrument × timeframe (fail-soft)",
+    )
     parser.add_argument("--days", type=int, default=365, help="backfill depth in days")
     parser.add_argument("--config-dir", default="config", help="config directory")
     args = parser.parse_args()
+
+    if args.all:
+        asyncio.run(_run_all(args.days, args.config_dir))
+        return
+
+    if args.symbol is None or args.timeframe is None:
+        parser.error("symbol dan timeframe wajib (atau gunakan --all)")
 
     asyncio.run(_run(args.symbol, args.timeframe, args.days, args.config_dir))
 

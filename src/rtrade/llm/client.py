@@ -157,7 +157,7 @@ class LLMClient:
                 cause = exc.__cause__ or exc
                 kind = classify_llm_error(cause)
                 last_error = exc
-                if kind in ("rate_limit", "auth"):
+                if kind in ("rate_limit", "auth", "subscription_limit"):
                     logger.warning(
                         "credential kena limit/auth — fallback ke berikutnya",
                         cred_id=cred.cred_id,

@@ -10,6 +10,8 @@ class LoginFlow(StrEnum):
     LOOPBACK = "loopback"
     PASTE_URL = "paste_url"
     DEVICE_CODE = "device_code"
+    PKCE_LOOPBACK = "pkce_loopback"
+    PASTE_CODE = "paste_code"
 
 
 def auto_flow(preferred: str | None) -> LoginFlow:

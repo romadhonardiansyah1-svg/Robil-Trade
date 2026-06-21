@@ -76,11 +76,23 @@ def test_registry_builds_codex_oauth() -> None:
 
 
 def test_registry_builds_xai_oauth() -> None:
+    """xai_oauth is now PKCE Authorization-Code (loopback), NOT device code.
+
+    The corrected manifest carries authorize_url + token_url at accounts.x.ai and
+    no device_auth_url; the device flow is reserved for codex_oauth.
+    """
+    from rtrade.llm.auth.provider_profiles import load_provider_profiles
     from rtrade.llm.auth.registry import build_provider_from_profile
+
+    profiles = load_provider_profiles(None)
+    xai = profiles["xai_oauth"]
+    assert xai.login_flow == "pkce_loopback"
+    assert "accounts.x.ai" in xai.authorize_url
+    assert not xai.device_auth_url  # device flow no longer used for xAI
 
     prov = build_provider_from_profile("xai_oauth")
     assert prov.provider_id == "xai_oauth"
-    assert "accounts.x.ai" in prov.device_auth_url or prov.device_auth_url != ""
+    assert "accounts.x.ai" in prov.token_url
 
 
 def test_disabled_alias_rejected() -> None:

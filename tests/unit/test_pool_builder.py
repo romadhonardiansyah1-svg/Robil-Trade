@@ -65,6 +65,31 @@ def test_pool_includes_xai_keys(monkeypatch, tmp_path) -> None:
     assert by_id["xai_key_1"].flavor == "xai"
 
 
+def test_pool_includes_openrouter_keys(monkeypatch, tmp_path) -> None:
+    cfg = _cfg(
+        monkeypatch,
+        tmp_path,
+        gemini_api_key_1="AIza1",
+        openrouter_api_key_1="sk-or-1",
+        openrouter_api_key_2="sk-or-2",
+    )
+    from rtrade.llm.pool_builder import build_scan_pool
+
+    pool = build_scan_pool(cfg)
+    ids = [e.cred_id for e in pool.entries]
+    assert "openrouter_key_1" in ids
+    assert "openrouter_key_2" in ids
+    by_id = {e.cred_id: e for e in pool.entries}
+    assert by_id["openrouter_key_1"].flavor == "openrouter"
+    assert by_id["openrouter_key_2"].flavor == "openrouter"
+
+
+def test_model_flavor_openrouter() -> None:
+    from rtrade.llm.auth.pool import model_flavor
+
+    assert model_flavor("openrouter/anthropic/claude-sonnet-4") == "openrouter"
+
+
 def test_pool_includes_vertex_adc_accounts(monkeypatch, tmp_path) -> None:
     cfg = _cfg(monkeypatch, tmp_path, gemini_api_key_1="AIza1")
     cfg.settings.llm.vertex_project = "proj-x"
@@ -134,3 +159,24 @@ def test_build_scan_pool_accepts_redis_client(monkeypatch, tmp_path) -> None:
 
     pool = build_scan_pool(cfg, redis_client=_FakeRedis())
     assert pool.size == 1
+
+
+def test_pool_threads_subscription_cooldown_from_config(monkeypatch, tmp_path) -> None:
+    """cfg.settings.llm.pool.subscription_cooldown_seconds dipakai pool yang dibangun."""
+    import asyncio
+    import time
+
+    cfg = _cfg(monkeypatch, tmp_path, gemini_api_key_1="AIza1")
+    # Custom subscription cooldown to prove config threading (not the 18000 default).
+    cfg.settings.llm.pool.subscription_cooldown_seconds = 12345
+    from rtrade.llm.pool_builder import build_scan_pool
+
+    pool = build_scan_pool(cfg)
+
+    async def run() -> float:
+        c = await pool.acquire()
+        await pool.report_failure(c.cred_id, kind="subscription_limit")
+        return next(iter(pool._km._cooldowns.values()))
+
+    expiry = asyncio.run(run())
+    assert time.time() + 12000 < expiry < time.time() + 13000

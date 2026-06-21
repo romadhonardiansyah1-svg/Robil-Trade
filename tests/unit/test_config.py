@@ -187,3 +187,11 @@ class TestMultiSlotKeys:
             Secrets(gemini_api_key_4="sk-ant-oat-xyz")
         with pytest.raises(Exception, match="FORBIDDEN"):
             Secrets(xai_api_key_2="sk-ant-oat-xyz")
+
+    def test_secrets_keys_for_openrouter(self) -> None:
+        s = Secrets(openrouter_api_key_1="sk-or-x")
+        assert s.keys_for("openrouter") == ["sk-or-x"]
+
+    def test_secrets_rejects_consumer_token_on_openrouter_slot(self) -> None:
+        with pytest.raises(ValidationError, match="FORBIDDEN"):
+            Secrets(openrouter_api_key_1="sk-ant-oat-xyz")

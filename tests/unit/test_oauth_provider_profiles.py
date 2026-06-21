@@ -138,3 +138,110 @@ class TestValidateProfile:
         )
         issues = validate_provider_profile("test_bad", profile)
         assert any("device_auth_url" in i for i in issues)
+
+
+class TestPkceProfileFields:
+    """PKCE loopback / paste-URL provider fields (authorize_url + redirect_uri)."""
+
+    def test_resolve_authorize_and_redirect_inline(self) -> None:
+        profile = OAuthProviderProfile(
+            label="xai",
+            auth_mode="oauth2",
+            capability="subscription_oauth",
+            enabled=True,
+            login_flow="pkce_loopback",
+            authorize_url="https://accounts.x.ai/oauth/authorize",
+            token_url="https://accounts.x.ai/oauth/token",
+            redirect_uri="http://127.0.0.1:56121/callback",
+            client_id="cid",
+        )
+        resolved = resolve_env_profile(profile)
+        assert resolved.authorize_url == "https://accounts.x.ai/oauth/authorize"
+        assert resolved.redirect_uri == "http://127.0.0.1:56121/callback"
+
+    def test_resolve_authorize_and_redirect_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MY_AUTH_URL", "https://auth.example.com/authorize")
+        monkeypatch.setenv("MY_REDIRECT", "http://127.0.0.1:9999/cb")
+        profile = OAuthProviderProfile(
+            label="x",
+            auth_mode="oauth2",
+            capability="subscription_oauth",
+            enabled=True,
+            login_flow="pkce_loopback",
+            authorize_url_env="MY_AUTH_URL",
+            redirect_uri_env="MY_REDIRECT",
+            token_url="https://t.example.com",
+        )
+        resolved = resolve_env_profile(profile)
+        assert resolved.authorize_url == "https://auth.example.com/authorize"
+        assert resolved.redirect_uri == "http://127.0.0.1:9999/cb"
+
+    def test_inline_preferred_over_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MY_AUTH_URL", "https://env.example.com/authorize")
+        profile = OAuthProviderProfile(
+            label="x",
+            auth_mode="oauth2",
+            capability="subscription_oauth",
+            enabled=True,
+            login_flow="pkce_loopback",
+            authorize_url="https://inline.example.com/authorize",
+            authorize_url_env="MY_AUTH_URL",
+            token_url="https://t.example.com",
+        )
+        resolved = resolve_env_profile(profile)
+        assert resolved.authorize_url == "https://inline.example.com/authorize"
+
+    def test_pkce_loopback_valid_without_device_url(self) -> None:
+        from rtrade.llm.auth.provider_profiles import validate_provider_profile
+
+        profile = OAuthProviderProfile(
+            label="xai",
+            auth_mode="oauth2",
+            capability="subscription_oauth",
+            enabled=True,
+            login_flow="pkce_loopback",
+            authorize_url="https://accounts.x.ai/oauth/authorize",
+            token_url="https://accounts.x.ai/oauth/token",
+            redirect_uri="http://127.0.0.1:56121/callback",
+            client_id="cid",
+        )
+        assert validate_provider_profile("xai_oauth", profile) == []
+
+    def test_pkce_loopback_without_authorize_url_warns(self) -> None:
+        from rtrade.llm.auth.provider_profiles import validate_provider_profile
+
+        profile = OAuthProviderProfile(
+            label="xai",
+            auth_mode="oauth2",
+            capability="subscription_oauth",
+            enabled=True,
+            login_flow="pkce_loopback",
+            token_url="https://accounts.x.ai/oauth/token",
+        )
+        issues = validate_provider_profile("xai_oauth", profile)
+        assert any("authorize_url" in i for i in issues)
+
+
+class TestExampleManifestXai:
+    """The shipped example manifest must configure xAI for PKCE loopback."""
+
+    def test_xai_oauth_is_pkce_loopback(self) -> None:
+        from rtrade.llm.auth.provider_profiles import validate_provider_profile
+
+        profiles = load_provider_profiles(Path("config"))
+        xai = profiles["xai_oauth"]
+        assert xai.login_flow == "pkce_loopback"
+        assert xai.auth_mode == "oauth2"
+        assert xai.capability == "subscription_oauth"
+        assert xai.authorize_url
+        assert xai.redirect_uri
+        assert xai.token_url
+        assert validate_provider_profile("xai_oauth", xai) == []
+
+    def test_codex_oauth_still_device_code(self) -> None:
+        from rtrade.llm.auth.provider_profiles import validate_provider_profile
+
+        profiles = load_provider_profiles(Path("config"))
+        codex = profiles["codex_oauth"]
+        assert codex.login_flow == "device_code"
+        assert validate_provider_profile("codex_oauth", codex) == []

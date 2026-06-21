@@ -144,6 +144,98 @@ class TestPKCE:
             )
 
 
+class TestPkcePasteLogin:
+    """PKCE paste-URL login (VPS-ready secure flow for xAI/Grok/Qwen/Google)."""
+
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_matching_state_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Deterministic state/verifier so the test can assert on the authorize URL.
+        monkeypatch.setattr(
+            "rtrade.llm.auth.oauth2.secrets.token_urlsafe", lambda _n=32: "FIXEDSTATE"
+        )
+        captured: list[str] = []
+        monkeypatch.setattr(
+            "builtins.print", lambda *a, **_k: captured.append(" ".join(str(x) for x in a))
+        )
+        monkeypatch.setattr(
+            "builtins.input",
+            lambda _prompt="": "http://127.0.0.1:56121/callback?code=ABC&state=FIXEDSTATE",
+        )
+        respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "pkce_tok", "expires_in": 3600})
+        )
+        prov = _make_provider()
+        tok = await prov.pkce_paste_login(
+            authorize_url="https://accounts.x.ai/oauth/authorize",
+            redirect_uri="http://127.0.0.1:56121/callback",
+        )
+        assert tok.access_token == "pkce_tok"
+        blob = "\n".join(captured)
+        # The authorize URL printed to the user must carry our state + challenge.
+        assert "state=FIXEDSTATE" in blob
+        assert "code_challenge=" in blob
+        assert "accounts.x.ai/oauth/authorize" in blob
+
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_state_mismatch_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "rtrade.llm.auth.oauth2.secrets.token_urlsafe", lambda _n=32: "FIXEDSTATE"
+        )
+        monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            "builtins.input",
+            lambda _prompt="": "http://127.0.0.1:56121/callback?code=ABC&state=ATTACKER",
+        )
+        prov = _make_provider()
+        with pytest.raises(ValueError, match="state mismatch"):
+            await prov.pkce_paste_login(
+                authorize_url="https://accounts.x.ai/oauth/authorize",
+                redirect_uri="http://127.0.0.1:56121/callback",
+            )
+
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_bare_code_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bare code without state param is accepted (no state to verify)."""
+        monkeypatch.setattr("rtrade.llm.auth.oauth2.secrets.token_urlsafe", lambda _n=32: "S")
+        monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
+        monkeypatch.setattr("builtins.input", lambda _prompt="": "BARECODE123")
+        respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(200, json={"access_token": "bare_tok", "expires_in": 3600})
+        )
+        prov = _make_provider()
+        tok = await prov.pkce_paste_login(
+            authorize_url="https://accounts.x.ai/oauth/authorize",
+            redirect_uri="http://127.0.0.1:56121/callback",
+        )
+        assert tok.access_token == "bare_tok"
+
+    @pytest.mark.usefixtures("_token_env")
+    @respx.mock
+    async def test_no_token_value_logged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("rtrade.llm.auth.oauth2.secrets.token_urlsafe", lambda _n=32: "FIXED")
+        monkeypatch.setattr("builtins.print", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            "builtins.input",
+            lambda _prompt="": "http://127.0.0.1:56121/callback?code=ABC&state=FIXED",
+        )
+        respx.post(TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200, json={"access_token": "SECRET_TOK", "expires_in": 3600}
+            )
+        )
+        prov = _make_provider()
+        with structlog.testing.capture_logs() as logs:
+            tok = await prov.pkce_paste_login(
+                authorize_url="https://accounts.x.ai/oauth/authorize",
+                redirect_uri="http://127.0.0.1:56121/callback",
+            )
+        assert tok.access_token == "SECRET_TOK"
+        assert "SECRET_TOK" not in repr(logs)
+
+
 class TestNoTokenRaisesError:
     @pytest.mark.usefixtures("_token_env")
     async def test_device_code_grant_no_token(self) -> None:

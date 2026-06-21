@@ -84,6 +84,81 @@ def _google_login(flow_override: str | None = None, account: str = "default") ->
     logger.info("google login sukses — ADC tersimpan", account=account, path=str(per_account))
 
 
+def perform_login(
+    provider_id: str, account: str = "default", *, manual_paste: bool = False
+) -> None:
+    """Resolve a Hermes-style provider profile and execute its OAuth login flow.
+
+    Reusable execution path shared by `rtrade auth login` and the setup wizard.
+    Loads the provider profile, builds the credential provider, and dispatches by
+    `login_flow`: `device_code` (or empty/legacy) uses Device Code Flow; `pkce_loopback`/
+    `paste_url` use the PKCE paste-URL path (VPS-ready). `manual_paste` is accepted for
+    headless/VPS callers; both supported flows are already non-interactive-browser safe.
+    Never logs or echoes any secret value.
+    """
+    from rtrade.llm.auth.provider_profiles import load_provider_profiles, resolve_env_profile
+    from rtrade.llm.auth.registry import build_provider_from_profile
+    from rtrade.llm.auth.token_store import account_store_id
+
+    profiles = load_provider_profiles(None)
+    if provider_id not in profiles:
+        print(  # noqa: T201
+            f"Provider '{provider_id}' tidak ditemukan. Tersedia: {', '.join(profiles.keys())}"
+        )
+        sys.exit(1)
+    profile = profiles[provider_id]
+    if not profile.enabled:
+        print(  # noqa: T201
+            f"Provider '{provider_id}' disabled. "
+            f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
+        )
+        sys.exit(1)
+    if profile.auth_mode == "external_command":
+        print(  # noqa: T201
+            f"Provider '{provider_id}' memakai auth_mode=external_command yang belum "
+            "didukung jalur login bawaan. Gunakan provider API key / OAuth gateway, "
+            "atau sediakan adapter eksternal sesuai docs/AUTH_OAUTH.md."
+        )
+        sys.exit(1)
+    # Build store_id = provider__account
+    sid = account_store_id(provider_id, account)
+    provider = build_provider_from_profile(provider_id, store_id=sid)
+
+    # Dispatch by the profile's login_flow. device_code (or empty/legacy) keeps
+    # the existing device flow; pkce_loopback/paste_url use the PKCE paste-URL
+    # path (VPS-ready). manual_paste forces the headless paste path.
+    login_flow = profile.login_flow or "device_code"
+    if login_flow in ("pkce_loopback", "paste_url"):
+        resolved = resolve_env_profile(profile)
+        if not resolved.client_id:
+            missing = profile.client_id_env or "client_id"
+            raise SystemExit(
+                f"Login {provider_id} butuh client_id — set env {missing} "
+                "(lihat config/oauth_providers.example.yaml)."
+            )
+        if not resolved.authorize_url:
+            missing = profile.authorize_url_env or "authorize_url"
+            raise SystemExit(
+                f"Login {provider_id} butuh authorize_url — set env {missing} "
+                "atau isi authorize_url di manifest."
+            )
+        if not resolved.redirect_uri:
+            missing = profile.redirect_uri_env or "redirect_uri"
+            raise SystemExit(
+                f"Login {provider_id} butuh redirect_uri — set env {missing} "
+                "atau isi redirect_uri di manifest."
+            )
+        asyncio.run(
+            provider.pkce_paste_login(
+                authorize_url=resolved.authorize_url,
+                redirect_uri=resolved.redirect_uri,
+            )
+        )
+    else:
+        asyncio.run(provider.device_login())
+    print(f"✓ Login berhasil — token tersimpan ({sid})")  # noqa: T201
+
+
 def _cmd_login(args: argparse.Namespace) -> None:
     flow = getattr(args, "flow", None)
     account = getattr(args, "account", "default")
@@ -96,36 +171,7 @@ def _cmd_login(args: argparse.Namespace) -> None:
         asyncio.run(build_generic_oauth_from_env().device_login())
     else:
         # Hermes-style: load profile and login via appropriate flow
-        from rtrade.llm.auth.provider_profiles import load_provider_profiles
-        from rtrade.llm.auth.registry import build_provider_from_profile
-        from rtrade.llm.auth.token_store import account_store_id
-
-        profiles = load_provider_profiles(None)
-        if args.provider not in profiles:
-            print(  # noqa: T201
-                f"Provider '{args.provider}' tidak ditemukan. "
-                f"Tersedia: {', '.join(profiles.keys())}"
-            )
-            sys.exit(1)
-        profile = profiles[args.provider]
-        if not profile.enabled:
-            print(  # noqa: T201
-                f"Provider '{args.provider}' disabled. "
-                f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
-            )
-            sys.exit(1)
-        if profile.auth_mode == "external_command":
-            print(  # noqa: T201
-                f"Provider '{args.provider}' memakai auth_mode=external_command yang belum "
-                "didukung jalur login bawaan. Gunakan provider API key / OAuth gateway, "
-                "atau sediakan adapter eksternal sesuai docs/AUTH_OAUTH.md."
-            )
-            sys.exit(1)
-        # Build store_id = provider__account
-        sid = account_store_id(args.provider, account)
-        provider = build_provider_from_profile(args.provider, store_id=sid)
-        asyncio.run(provider.device_login())
-        print(f"✓ Login berhasil — token tersimpan ({sid})")  # noqa: T201
+        perform_login(args.provider, account, manual_paste=getattr(args, "manual_paste", False))
 
 
 def _cmd_providers(_args: argparse.Namespace) -> None:
@@ -240,6 +286,7 @@ def _cmd_use(args: argparse.Namespace) -> None:
 
     from rtrade.llm.auth.model_catalog import list_provider_models
     from rtrade.llm.auth.provider_profiles import load_provider_profiles
+    from rtrade.llm.auth.routing import set_model_route
 
     profiles = load_provider_profiles(None)
     if args.provider not in profiles:
@@ -263,52 +310,24 @@ def _cmd_use(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-    # Determine auth_profile name for this provider
-    auth_profile_name = f"{args.provider}_cli_oauth"
-    if profile.auth_mode == "vertex":
-        auth_profile_name = f"{args.provider}_vertex"
-    elif profile.auth_mode == "api_key":
-        auth_profile_name = f"{args.provider}_api_key"
-
-    # Update settings.yaml
+    # Preserve current semantics: vertex_project dibaca dari llm doc in-memory.
     settings_path = Path("config") / "settings.yaml"
     if settings_path.exists():
         with settings_path.open("r", encoding="utf-8") as fh:
             doc = yaml.safe_load(fh) or {}
     else:
         doc = {}
+    vertex_project = doc.get("llm", {}).get("vertex_project", "")
 
-    llm = doc.setdefault("llm", {})
-    routes = llm.setdefault("model_routes", {})
-    profiles_cfg = llm.setdefault("auth_profiles", {})
-
-    # Buat/lengkapi entri auth_profiles supaya route TIDAK menggantung (C4).
-    entry: dict[str, object] = {"enabled": True}
-    if profile.auth_mode == "vertex":
-        entry["auth_type"] = "vertex"
-        entry["vertex_project"] = llm.get("vertex_project", "")
-    elif profile.auth_mode == "api_key":
-        entry["auth_type"] = "api_key"
-        # api_key_secret kosong → pool pakai key dari Secrets family (lihat pool_builder).
-    else:
-        # oauth2 / external_command / subscription → kredensial token store via CLI login.
-        entry["auth_type"] = "cli_oauth"
-        entry["provider_id"] = args.provider
-        entry["account"] = getattr(args, "account", "default")
-    # Jangan timpa kunci lain yang mungkin sudah diisi operator manual.
-    existing = profiles_cfg.get(auth_profile_name)
-    if isinstance(existing, dict):
-        existing.update(entry)
-    else:
-        profiles_cfg[auth_profile_name] = entry
-
-    routes[args.role] = {
-        "model": args.model,
-        "auth_profile": auth_profile_name,
-    }
-
-    with settings_path.open("w", encoding="utf-8") as fh:
-        yaml.dump(doc, fh, default_flow_style=False, allow_unicode=True)
+    set_model_route(
+        settings_path=settings_path,
+        role=args.role,
+        provider_id=args.provider,
+        model=args.model,
+        auth_mode=profile.auth_mode,
+        account=getattr(args, "account", "default"),
+        vertex_project=vertex_project,
+    )
 
     print(  # noqa: T201
         f"role={args.role} → model={args.model} "
@@ -356,9 +375,20 @@ def main() -> None:
     )
     login.add_argument(
         "--flow",
-        choices=["loopback", "paste_url", "device_code"],
+        choices=["loopback", "paste_url", "device_code", "pkce_loopback", "paste_code"],
         default=None,
         help="Login flow (default: auto-detect)",
+    )
+    login.add_argument(
+        "--manual-paste",
+        action="store_true",
+        help="Paksa jalur paste-URL (VPS/headless): buka URL authorize di browser lokal "
+        "lalu tempel URL callback (tidak ada auto-open browser)",
+    )
+    login.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Jangan buka browser otomatis — sama dengan --manual-paste untuk task ini",
     )
 
     sub.add_parser("providers", help="List available OAuth providers")

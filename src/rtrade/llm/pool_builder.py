@@ -76,7 +76,7 @@ def build_scan_pool(
     primary_flavor = model_flavor(resolve_role_model(cfg, "analyst"))
 
     # --- 1. API keys, family model analyst dulu, sisanya menyusul ---
-    families = ["gemini", "anthropic", "openai", "xai"]
+    families = ["gemini", "anthropic", "openai", "xai", "openrouter"]
     families.sort(key=lambda f: f != primary_flavor)
     for fam in families:
         for i, key in enumerate(cfg.secrets.keys_for(fam), start=1):
@@ -183,4 +183,11 @@ def build_scan_pool(
         cred_ids=[e.cred_id for e in entries],
         primary_flavor=primary_flavor,
     )
-    return CredentialPool(entries, redis_client=redis_client)
+    pool_cfg = cfg.settings.llm.pool
+    return CredentialPool(
+        entries,
+        redis_client=redis_client,
+        cooldown_seconds=pool_cfg.cooldown_seconds,
+        auth_cooldown_seconds=pool_cfg.auth_cooldown_seconds,
+        subscription_cooldown_seconds=pool_cfg.subscription_cooldown_seconds,
+    )

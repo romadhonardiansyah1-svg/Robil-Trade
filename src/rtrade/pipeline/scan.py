@@ -1005,6 +1005,10 @@ async def _run_strategies(
             edge_quality_enabled=cfg.settings.signal.edge_quality.enabled,
             edge_quality_config=edge_cfg,
             spread=spread,
+            # InstrumentConfig has no lot_step field today, so this resolves to
+            # None (no rounding -> behaviour unchanged). Threaded via getattr so
+            # the hardened min-lot abstain auto-engages if the field is added.
+            lot_step=getattr(instrument, "lot_step", None),
         )
         if candidate is None:
             continue

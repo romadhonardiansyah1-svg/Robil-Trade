@@ -11,6 +11,7 @@ Checks:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -79,11 +80,15 @@ class HealthChecker:
         redis_url: str = "",
         litellm_url: str = "",
         disk_threshold_pct: float = 85.0,
+        timeout_s: float = 5.0,
     ) -> None:
         self._db_url = db_url
         self._redis_url = redis_url
         self._litellm_url = litellm_url
         self._disk_threshold = disk_threshold_pct
+        # E6: bound every connectivity probe so a hung backend fails fast
+        # instead of making the whole healthcheck hang indefinitely.
+        self._timeout_s = timeout_s
 
     async def run_all(self) -> SystemHealth:
         """Execute all health checks and aggregate results."""
@@ -108,18 +113,12 @@ class HealthChecker:
         return SystemHealth(status=overall, checks=checks)
 
     async def check_database(self) -> CheckResult:
-        """Check TimescaleDB connectivity."""
+        """Check TimescaleDB connectivity (bounded by ``timeout_s``)."""
         import time
 
         start = time.monotonic()
         try:
-            import asyncpg
-
-            conn = await asyncpg.connect(
-                self._db_url.replace("+asyncpg", "") if "+asyncpg" in self._db_url else self._db_url
-            )
-            version = await conn.fetchval("SELECT version()")
-            await conn.close()
+            version = await asyncio.wait_for(self._probe_database(), timeout=self._timeout_s)
             elapsed = (time.monotonic() - start) * 1000
 
             return CheckResult(
@@ -128,6 +127,15 @@ class HealthChecker:
                 message="connected",
                 latency_ms=elapsed,
                 details={"version": version[:60] if version else ""},
+            )
+        except TimeoutError:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.error("db health check timed out", timeout_s=self._timeout_s)
+            return CheckResult(
+                name="database",
+                status=HealthStatus.UNHEALTHY,
+                message=f"timeout after {self._timeout_s}s",
+                latency_ms=elapsed,
             )
         except Exception as exc:
             elapsed = (time.monotonic() - start) * 1000
@@ -139,18 +147,26 @@ class HealthChecker:
                 latency_ms=elapsed,
             )
 
+    async def _probe_database(self) -> str | None:
+        """Connect to the DB and read its version. Bounded by ``check_database``."""
+        import asyncpg
+
+        conn = await asyncpg.connect(
+            self._db_url.replace("+asyncpg", "") if "+asyncpg" in self._db_url else self._db_url
+        )
+        try:
+            version: str | None = await conn.fetchval("SELECT version()")
+        finally:
+            await conn.close()
+        return version
+
     async def check_redis(self) -> CheckResult:
-        """Check Redis connectivity."""
+        """Check Redis connectivity (bounded by ``timeout_s``)."""
         import time
 
         start = time.monotonic()
         try:
-            import redis.asyncio as aioredis
-
-            r = aioredis.from_url(self._redis_url)
-            pong = await r.ping()
-            info = await r.info("memory")
-            await r.aclose()
+            pong, used_memory = await asyncio.wait_for(self._probe_redis(), timeout=self._timeout_s)
             elapsed = (time.monotonic() - start) * 1000
 
             return CheckResult(
@@ -158,7 +174,16 @@ class HealthChecker:
                 status=HealthStatus.HEALTHY,
                 message="pong" if pong else "no pong",
                 latency_ms=elapsed,
-                details={"used_memory_human": info.get("used_memory_human", "?")},
+                details={"used_memory_human": used_memory},
+            )
+        except TimeoutError:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.error("redis health check timed out", timeout_s=self._timeout_s)
+            return CheckResult(
+                name="redis",
+                status=HealthStatus.UNHEALTHY,
+                message=f"timeout after {self._timeout_s}s",
+                latency_ms=elapsed,
             )
         except Exception as exc:
             elapsed = (time.monotonic() - start) * 1000
@@ -169,6 +194,18 @@ class HealthChecker:
                 message=f"connection failed: {exc}",
                 latency_ms=elapsed,
             )
+
+    async def _probe_redis(self) -> tuple[bool, str]:
+        """Ping Redis and read memory info. Bounded by ``check_redis``."""
+        import redis.asyncio as aioredis
+
+        r = aioredis.from_url(self._redis_url)
+        try:
+            pong = await r.ping()
+            info = await r.info("memory")
+        finally:
+            await r.aclose()
+        return bool(pong), str(info.get("used_memory_human", "?"))
 
     async def check_litellm(self) -> CheckResult | None:
         """Check LiteLLM proxy health. Skip entirely when no proxy is configured (library mode)."""

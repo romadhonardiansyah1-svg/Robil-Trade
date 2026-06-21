@@ -10,7 +10,10 @@
 # - Exit code logging for alerting
 # ============================================================================
 
-set -e
+# -e: abort on any error. -u: treat unset vars as errors.
+# -o pipefail: a failing pg_dump in the `pg_dump | gzip` pipe is no longer
+#   masked by gzip's success (runs on busybox sh — postgres:*-alpine).
+set -euo pipefail
 
 BACKUP_DIR="/backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)

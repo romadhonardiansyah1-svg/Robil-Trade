@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+import time
 
 import pytest
 
@@ -162,6 +164,52 @@ class TestHealthCheckerDisk:
         )
         assert "used_pct" in result.details
         assert "free_gb" in result.details
+
+
+class TestHealthCheckerTimeouts:
+    """E6: DB/Redis connectivity probes must be bounded by a timeout.
+
+    A hung backend must not make the healthcheck hang indefinitely — each
+    probe must fail fast (within ~the configured timeout) and report UNHEALTHY.
+    """
+
+    @pytest.mark.asyncio
+    async def test_database_probe_bounded_by_timeout(self) -> None:
+        checker = HealthChecker(db_url="postgresql://unused", timeout_s=0.1)
+
+        async def _hang() -> str | None:
+            await asyncio.sleep(10)
+            return "never"
+
+        # Replace the real connection probe with one that hangs.
+        checker._probe_database = _hang  # type: ignore[method-assign]
+
+        start = time.monotonic()
+        result = await checker.check_database()
+        elapsed = time.monotonic() - start
+
+        assert result.name == "database"
+        assert result.status == HealthStatus.UNHEALTHY
+        # Must be bounded by the timeout, not the 10s sleep.
+        assert elapsed < 2.0, f"check_database hung for {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_redis_probe_bounded_by_timeout(self) -> None:
+        checker = HealthChecker(redis_url="redis://unused", timeout_s=0.1)
+
+        async def _hang() -> tuple[bool, str]:
+            await asyncio.sleep(10)
+            return True, "never"
+
+        checker._probe_redis = _hang  # type: ignore[method-assign]
+
+        start = time.monotonic()
+        result = await checker.check_redis()
+        elapsed = time.monotonic() - start
+
+        assert result.name == "redis"
+        assert result.status == HealthStatus.UNHEALTHY
+        assert elapsed < 2.0, f"check_redis hung for {elapsed:.2f}s"
 
 
 class TestHealthCheckerLitellmOptional:

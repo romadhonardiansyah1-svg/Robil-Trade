@@ -92,8 +92,14 @@ def run_backtest(
     opens = df["open"].astype(float).values
     n_bars = len(df)
 
+    # ``equity`` is the RUNNING basis used for risk sizing. Sizing intentionally
+    # stays in signal order (each trade risks ``risk_pct`` of the equity standing
+    # when its signal is processed), exactly as before — this keeps the
+    # single-position / non-overlapping case byte-for-byte unchanged. The equity
+    # CURVE, however, is rebuilt in chronological (exit-time) order after the loop
+    # (A10) so that drawdown/return reflect real time order rather than signal
+    # order. PnL is order-independent, so ``final_equity`` is identical either way.
     equity = initial_equity
-    equity_curve = [equity]
     trades: list[Trade] = []
 
     # Create Trade objects from signals.
@@ -274,7 +280,20 @@ def run_backtest(
 
             equity += trade.pnl or 0.0
 
-        equity_curve.append(equity)
+    # A10: build the equity curve in chronological (exit-time) order. Sizing/PnL
+    # above is unchanged; only the order in which realized PnL is accumulated into
+    # the curve changes. Sort filled trades by exit_bar (then fill_bar as a stable
+    # tie-break) so overlapping trades book in the order they actually closed. For
+    # non-overlapping trades this order equals signal order, so the curve is
+    # identical to before.
+    curve_equity = initial_equity
+    equity_curve = [curve_equity]
+    for trade in sorted(
+        (t for t in trades if t.fill_price is not None and t.pnl is not None),
+        key=_curve_order_key,
+    ):
+        curve_equity += trade.pnl or 0.0
+        equity_curve.append(curve_equity)
 
     return BacktestResult(
         trades=trades,
@@ -282,6 +301,17 @@ def run_backtest(
         initial_equity=initial_equity,
         final_equity=equity,
     )
+
+
+def _curve_order_key(trade: Trade) -> tuple[int, int]:
+    """Chronological sort key for equity-curve accumulation (exit_bar, fill_bar).
+
+    Only invoked for filled trades, whose ``exit_bar`` and ``fill_bar`` are always
+    set by the time the curve is built.
+    """
+    assert trade.exit_bar is not None
+    assert trade.fill_bar is not None
+    return (trade.exit_bar, trade.fill_bar)
 
 
 def _as_int(value: Any, field_name: str) -> int:

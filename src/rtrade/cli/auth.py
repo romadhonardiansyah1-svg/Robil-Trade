@@ -84,6 +84,81 @@ def _google_login(flow_override: str | None = None, account: str = "default") ->
     logger.info("google login sukses — ADC tersimpan", account=account, path=str(per_account))
 
 
+def perform_login(
+    provider_id: str, account: str = "default", *, manual_paste: bool = False
+) -> None:
+    """Resolve a Hermes-style provider profile and execute its OAuth login flow.
+
+    Reusable execution path shared by `rtrade auth login` and the setup wizard.
+    Loads the provider profile, builds the credential provider, and dispatches by
+    `login_flow`: `device_code` (or empty/legacy) uses Device Code Flow; `pkce_loopback`/
+    `paste_url` use the PKCE paste-URL path (VPS-ready). `manual_paste` is accepted for
+    headless/VPS callers; both supported flows are already non-interactive-browser safe.
+    Never logs or echoes any secret value.
+    """
+    from rtrade.llm.auth.provider_profiles import load_provider_profiles, resolve_env_profile
+    from rtrade.llm.auth.registry import build_provider_from_profile
+    from rtrade.llm.auth.token_store import account_store_id
+
+    profiles = load_provider_profiles(None)
+    if provider_id not in profiles:
+        print(  # noqa: T201
+            f"Provider '{provider_id}' tidak ditemukan. Tersedia: {', '.join(profiles.keys())}"
+        )
+        sys.exit(1)
+    profile = profiles[provider_id]
+    if not profile.enabled:
+        print(  # noqa: T201
+            f"Provider '{provider_id}' disabled. "
+            f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
+        )
+        sys.exit(1)
+    if profile.auth_mode == "external_command":
+        print(  # noqa: T201
+            f"Provider '{provider_id}' memakai auth_mode=external_command yang belum "
+            "didukung jalur login bawaan. Gunakan provider API key / OAuth gateway, "
+            "atau sediakan adapter eksternal sesuai docs/AUTH_OAUTH.md."
+        )
+        sys.exit(1)
+    # Build store_id = provider__account
+    sid = account_store_id(provider_id, account)
+    provider = build_provider_from_profile(provider_id, store_id=sid)
+
+    # Dispatch by the profile's login_flow. device_code (or empty/legacy) keeps
+    # the existing device flow; pkce_loopback/paste_url use the PKCE paste-URL
+    # path (VPS-ready). manual_paste forces the headless paste path.
+    login_flow = profile.login_flow or "device_code"
+    if login_flow in ("pkce_loopback", "paste_url"):
+        resolved = resolve_env_profile(profile)
+        if not resolved.client_id:
+            missing = profile.client_id_env or "client_id"
+            raise SystemExit(
+                f"Login {provider_id} butuh client_id — set env {missing} "
+                "(lihat config/oauth_providers.example.yaml)."
+            )
+        if not resolved.authorize_url:
+            missing = profile.authorize_url_env or "authorize_url"
+            raise SystemExit(
+                f"Login {provider_id} butuh authorize_url — set env {missing} "
+                "atau isi authorize_url di manifest."
+            )
+        if not resolved.redirect_uri:
+            missing = profile.redirect_uri_env or "redirect_uri"
+            raise SystemExit(
+                f"Login {provider_id} butuh redirect_uri — set env {missing} "
+                "atau isi redirect_uri di manifest."
+            )
+        asyncio.run(
+            provider.pkce_paste_login(
+                authorize_url=resolved.authorize_url,
+                redirect_uri=resolved.redirect_uri,
+            )
+        )
+    else:
+        asyncio.run(provider.device_login())
+    print(f"✓ Login berhasil — token tersimpan ({sid})")  # noqa: T201
+
+
 def _cmd_login(args: argparse.Namespace) -> None:
     flow = getattr(args, "flow", None)
     account = getattr(args, "account", "default")
@@ -96,68 +171,7 @@ def _cmd_login(args: argparse.Namespace) -> None:
         asyncio.run(build_generic_oauth_from_env().device_login())
     else:
         # Hermes-style: load profile and login via appropriate flow
-        from rtrade.llm.auth.provider_profiles import load_provider_profiles, resolve_env_profile
-        from rtrade.llm.auth.registry import build_provider_from_profile
-        from rtrade.llm.auth.token_store import account_store_id
-
-        profiles = load_provider_profiles(None)
-        if args.provider not in profiles:
-            print(  # noqa: T201
-                f"Provider '{args.provider}' tidak ditemukan. "
-                f"Tersedia: {', '.join(profiles.keys())}"
-            )
-            sys.exit(1)
-        profile = profiles[args.provider]
-        if not profile.enabled:
-            print(  # noqa: T201
-                f"Provider '{args.provider}' disabled. "
-                f"Catatan: {profile.note or 'Aktifkan di oauth_providers.yaml'}"
-            )
-            sys.exit(1)
-        if profile.auth_mode == "external_command":
-            print(  # noqa: T201
-                f"Provider '{args.provider}' memakai auth_mode=external_command yang belum "
-                "didukung jalur login bawaan. Gunakan provider API key / OAuth gateway, "
-                "atau sediakan adapter eksternal sesuai docs/AUTH_OAUTH.md."
-            )
-            sys.exit(1)
-        # Build store_id = provider__account
-        sid = account_store_id(args.provider, account)
-        provider = build_provider_from_profile(args.provider, store_id=sid)
-
-        # Dispatch by the profile's login_flow. device_code (or empty/legacy) keeps
-        # the existing device flow; pkce_loopback/paste_url use the PKCE paste-URL
-        # path (VPS-ready). --manual-paste/--no-browser force the paste path.
-        login_flow = profile.login_flow or "device_code"
-        if login_flow in ("pkce_loopback", "paste_url"):
-            resolved = resolve_env_profile(profile)
-            if not resolved.client_id:
-                missing = profile.client_id_env or "client_id"
-                raise SystemExit(
-                    f"Login {args.provider} butuh client_id — set env {missing} "
-                    "(lihat config/oauth_providers.example.yaml)."
-                )
-            if not resolved.authorize_url:
-                missing = profile.authorize_url_env or "authorize_url"
-                raise SystemExit(
-                    f"Login {args.provider} butuh authorize_url — set env {missing} "
-                    "atau isi authorize_url di manifest."
-                )
-            if not resolved.redirect_uri:
-                missing = profile.redirect_uri_env or "redirect_uri"
-                raise SystemExit(
-                    f"Login {args.provider} butuh redirect_uri — set env {missing} "
-                    "atau isi redirect_uri di manifest."
-                )
-            asyncio.run(
-                provider.pkce_paste_login(
-                    authorize_url=resolved.authorize_url,
-                    redirect_uri=resolved.redirect_uri,
-                )
-            )
-        else:
-            asyncio.run(provider.device_login())
-        print(f"✓ Login berhasil — token tersimpan ({sid})")  # noqa: T201
+        perform_login(args.provider, account, manual_paste=getattr(args, "manual_paste", False))
 
 
 def _cmd_providers(_args: argparse.Namespace) -> None:
